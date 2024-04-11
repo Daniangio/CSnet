@@ -81,8 +81,6 @@ def build_info(
                     break
 
         cs = [cs_files[i] for i,s in enumerate(pdb_codes) if os.path.basename(pdb_file).startswith(s)]
-        if len(cs) == 0:
-            pass
 
         records.append({
             'pdb': pdb_file,
@@ -152,7 +150,7 @@ def get_dataset(
         atom_names.append(atom_name)
         atom_chains.append(atom_chain)
         atom_fullnames.append(atom_fullname)
-        atom_types.append(DataDict.get_atom_type(atom_resname, atom_name, atom.element))
+        atom_types.append(DataDict.get_atom_type(atom_resname, atom_name, atom.element, verbose=True))
     
     atom_resnumbers = np.array(atom_resnumbers)
     atom_resnames = np.array(atom_resnames)

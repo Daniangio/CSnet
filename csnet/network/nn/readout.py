@@ -148,12 +148,12 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         )
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        out_features = self.final_readout(data[self.inv_field])
+        out_features = self.final_readout(data[self.inv_field]).squeeze(-1)
 
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
-        species = data[AtomicDataDict.ATOM_TYPE_KEY]
+        species = data[AtomicDataDict.ATOM_TYPE_KEY].squeeze(-1)
         center_species = species[edge_center]
         out_features[edge_center] += self.per_species_bias[center_species]
         
-        data[self.inv_field] = out_features.squeeze(-1)
+        data[self.inv_field] = out_features
         return data
