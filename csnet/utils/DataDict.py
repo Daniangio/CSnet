@@ -6,11 +6,12 @@ from .._keys import *  # noqa: F403, F401
 from .. import _keys
 
 
-def get_atom_type(atom_resname, atom_name, element=None):
+def get_atom_type(atom_resname, atom_name, element=None, verbose=False):
     atom2atom_type = ATOM2ATOM_TYPE()
     atom_type = atom2atom_type.get((atom_resname, atom_name), atom2atom_type.get(element, None))
     if atom_type is None:
-        print(f"Unrecognized atom type for {atom_resname}, {atom_name}, {element}.")
+        if verbose:
+            print(f"Unrecognized atom type for {atom_resname}, {atom_name}, {element}.")
         return atom2atom_type.get("X")
     return atom_type
 

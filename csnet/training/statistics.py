@@ -27,6 +27,7 @@ def get_npz_statistics(
         all_idcs.append(idcs)
 
     df_dict: dict[str, pd.DataFrame] = {}
+    print(f"{len(filenames)} files analysed.")
     for filename, x, idcs in zip(filenames, all_x, all_idcs):
         for index in np.unique(idcs):
             df: pd.DataFrame = df_dict.get(index, None)
@@ -45,9 +46,23 @@ def get_npz_statistics(
     
     return df_dict
 
-def plot_distribution(statistics: dict, index: int):
-    fig = px.histogram(statistics[index], x='value', color='filename', nbins=100)
-    fig.show()
+def plot_distribution(statistics: dict, resname: str, atomname: str, src: str = 'true'):
+    try:
+        index = DataDict.get_atom_type(resname, atomname)
+        data = statistics[index]
+        if len(data) == 0:
+            return
+        fig = px.histogram(
+            data,
+            x='value',
+            color='filename',
+            nbins=100,
+            title=f"{resname}-{atomname}",
+        )
+        fig.show()
+        fig.write_html(f"../media/{resname}-{atomname}-{src}.html")
+    except:
+        pass
 
 def build_config_params(statistics: dict, config_root: str):
     txt = 'type_names:\n'
@@ -67,9 +82,9 @@ def build_config_params(statistics: dict, config_root: str):
         avg_feat_values.append(avg)
     avg_feat_values=np.nan_to_num(np.array(avg_feat_values))
 
-    txt = 'per_species_bias:\n'
+    txt = 'per_type_bias:\n'
     for avg_feat_value, type_name in zip(avg_feat_values, type_names):
         txt += f"  - {avg_feat_value: <20} # {type_name}\n"
         #txt += f'  - {}   #{type_name}\n'
-    with open(os.path.join(config_root, 'per_species_bias.yaml'), 'w') as f:
+    with open(os.path.join(config_root, 'per_type_bias.yaml'), 'w') as f:
         f.write(txt)

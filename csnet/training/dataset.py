@@ -2,6 +2,9 @@ import os
 import re
 import glob
 import sys
+import torch
+from pathlib import Path
+from tqdm.autonotebook import tqdm
 
 from csnet.utils import DataDict
 sys.path.append('..')
@@ -13,6 +16,8 @@ import MDAnalysis as mda
 from typing import Dict, Generator
 from os.path import basename
 from csnet.training.nmr import NMR, JOIN_CHAR
+from geqtrain.data import AtomicDataDict
+from geqtrain.scripts.evaluate import load_model, evaluate
 
 
 ADJUST_ATOM_NAMES = {
@@ -44,7 +49,7 @@ def build_dataset(
         for ds in get_dataset(
             pdb_filename,
             cs_filenames,
-            selection="protein"
+            selection="protein",
         ):
             if ds is not None:
                 np.savez(npz_file, **ds)
@@ -125,47 +130,10 @@ def get_dataset(
         selection: str = "protein",
         rmsf_threshold: float = 1.5
     ) -> Generator[Dict[str, np.ndarray], None, None]:
-    try:
-        u = mda.Universe(pdb_file)
-        protein = u.select_atoms(selection)
-    except Exception as e:
-        raise Exception (f"Could not load {pdb_file}") from e
-
-    atom_resnumbers = []
-    atom_resnames = []
-    atom_names = []
-    atom_chains = []
-    atom_fullnames = []
-    atom_types = []
-    
-    for atom in protein.atoms:
-        atom_resnumber = atom.resnum
-        atom_resname = atom.resname
-        atom_name = fix_atom_naming(atom.name)
-        atom_chain = atom.chainID
-        atom_fullname = JOIN_CHAR.join([str(atom_resnumber), atom_resname, atom_name, atom_chain])
-
-        atom_resnumbers.append(atom_resnumber)
-        atom_resnames.append(atom_resname)
-        atom_names.append(atom_name)
-        atom_chains.append(atom_chain)
-        atom_fullnames.append(atom_fullname)
-        atom_types.append(DataDict.get_atom_type(atom_resname, atom_name, atom.element, verbose=True))
-    
-    atom_resnumbers = np.array(atom_resnumbers)
-    atom_resnames = np.array(atom_resnames)
-    atom_names = np.array(atom_names)
-    atom_chains = np.array(atom_chains)
-    atom_fullnames = np.array(atom_fullnames)
-    atom_types = np.array(atom_types)
-
-    coords = []
-    for ts in u.trajectory:
-        coords.append(protein.positions)
-    coords = np.stack(coords, axis=0)
+    ds, mol = get_structure(pdb_file, selection=selection)
 
     # Build DataFrame from nmr file(s)
-    chain = atom_chain
+    chain = ds.get("atom_chains")[0]
     pdb_code = basename(pdb_file).split('.')[0].split(JOIN_CHAR)[1]
     if len(pdb_code) == 5:
         chain = pdb_code[-1]
@@ -199,7 +167,7 @@ def get_dataset(
 
     # Match nmr DataFrame and pdb Atom_fullname
     rows = []
-    for atom_fullname in atom_fullnames:
+    for atom_fullname in ds.get("atom_fullnames"):
         soft_atom_fullname = JOIN_CHAR.join(atom_fullname.split(JOIN_CHAR)[:-1])
         split_values = nmr_df['Atom_fullname'].str.split(JOIN_CHAR)
         nmr_entry_idx = nmr_df[split_values.apply(lambda x: x[:3] == soft_atom_fullname.split(JOIN_CHAR))].index
@@ -231,25 +199,146 @@ def get_dataset(
     cs_df = pd.DataFrame(rows, columns=nmr_df.columns)
     cs_df.loc[cs_df.Val_std > 0.1, "Val"] = np.nan # Drop nmr assignments with high variability
 
-    heavy_atoms_idcs = np.argwhere([atom_name.startswith('H') for atom_name in atom_names]).flatten()
-    discard_atom_idcs = get_atom_idcs_with_high_rmsf(coords, heavy_atoms_idcs, protein, rmsf_threshold=rmsf_threshold)
+    heavy_atoms_idcs = np.argwhere([atom_name.startswith('H') for atom_name in ds.get("atom_names")]).flatten()
+    discard_atom_idcs = get_atom_idcs_with_high_rmsf(ds.get("coords"), heavy_atoms_idcs, mol, rmsf_threshold=rmsf_threshold)
 
     # Extract chemical shifts
     cs = cs_df.Val.values.astype(np.float32)
     if discard_atom_idcs is not None:
         cs[discard_atom_idcs] = np.nan
-    cs = np.repeat(cs[None, ...], len(coords), axis=0)
+    cs = np.repeat(cs[None, ...], len(ds.get("coords")), axis=0)
+
+    # Build dataset
+    ds.update({
+        "chemical_shifts": cs,
+    })
+
+    yield ds
+
+def get_structure(pdb_file, traj_files = [], selection="all"):
+    try:
+        u = mda.Universe(pdb_file, *traj_files)
+        mol = u.select_atoms(selection)
+    except Exception as e:
+        raise Exception (f"Could not load {pdb_file}") from e
+
+    atom_resnumbers = []
+    atom_resnames = []
+    atom_names = []
+    atom_chains = []
+    atom_fullnames = []
+    atom_types = []
+
+    def get_chainID(atom):
+        try:
+            return atom.chainID
+        except:
+            return 'A'
+        
+    def get_element(atom):
+        try:
+            return atom.element
+        except:
+            return atom.type
+    
+    for atom in mol.atoms:
+        atom_resnumber = atom.resnum
+        atom_resname = atom.resname
+        atom_name = fix_atom_naming(atom.name)
+        atom_chain = get_chainID(atom)
+        atom_fullname = JOIN_CHAR.join([str(atom_resnumber), atom_resname, atom_name, atom_chain])
+
+        atom_resnumbers.append(atom_resnumber)
+        atom_resnames.append(atom_resname)
+        atom_names.append(atom_name)
+        atom_chains.append(atom_chain)
+        atom_fullnames.append(atom_fullname)
+        element = get_element(atom)
+        atom_types.append(DataDict.get_atom_type(atom_resname, atom_name, element, verbose=True))
+    
+    atom_resnumbers = np.array(atom_resnumbers)
+    atom_resnames = np.array(atom_resnames)
+    atom_names = np.array(atom_names)
+    atom_chains = np.array(atom_chains)
+    atom_fullnames = np.array(atom_fullnames)
+    atom_types = np.array(atom_types)
+
+    coords = []
+    for ts in u.trajectory:
+        coords.append(mol.positions)
+    coords = np.stack(coords, axis=0)
+
+    # - Remove clashing atoms - #
+    mask = np.triu_indices(coords.shape[1], k=1)
+    lengths = np.linalg.norm(coords[:, mask[0]] - coords[:, mask[1]], axis=-1)
+    keep_edges = np.all(lengths > 0.5, axis=0)
+    keep_idcs = np.union1d(np.unique(mask[0][keep_edges]), np.unique(mask[1][keep_edges]))
 
     # Build dataset
     ds = {
-        "coords": coords,
-        "chemical_shifts": cs,
-        "atom_types": atom_types,
-        "atom_resnumbers": atom_resnumbers,
-        "atom_resnames": atom_resnames,
-        "atom_names": atom_names,
-        "atom_chains": atom_chains,
-        "atom_fullnames": atom_fullnames,
+        "coords": coords[:, keep_idcs],
+        "atom_types": atom_types[keep_idcs],
+        "atom_resnumbers": atom_resnumbers[keep_idcs],
+        "atom_resnames": atom_resnames[keep_idcs],
+        "atom_names": atom_names[keep_idcs],
+        "atom_chains": atom_chains[keep_idcs],
+        "atom_fullnames": atom_fullnames[keep_idcs],
     }
+    
+    return ds, mol
 
-    yield ds
+def build_input_data(pdb_file, r_max: float, traj_files=[], selection="all"):
+    dataset, _ = get_structure(pdb_file, traj_files=traj_files, selection=selection)
+    return prepare_dataset(dataset, r_max=r_max)
+    
+def prepare_dataset(dataset, r_max):
+    coords = torch.from_numpy(dataset.get("coords"))
+    node_types = torch.from_numpy(dataset.get("atom_types"))
+    batch = torch.zeros(coords.shape[-2], dtype=torch.long)
+    
+    return [{
+        AtomicDataDict.POSITIONS_KEY: pos,
+        f"{AtomicDataDict.POSITIONS_KEY}_slices": torch.tensor([0, len(pos)]),
+        AtomicDataDict.NODE_TYPE_KEY: node_types,
+        AtomicDataDict.EDGE_INDEX_KEY: get_edge_index(positions=pos, r_max=r_max),
+        AtomicDataDict.BATCH_KEY: batch,
+    }
+    for pos in coords
+    ], dataset
+
+def get_edge_index(positions: torch.Tensor, r_max: float):
+    dist_matrix = torch.norm(positions[:, None, ...] - positions[None, ...], dim=-1).fill_diagonal_(torch.inf)
+    return torch.argwhere(dist_matrix <= r_max).T.long()
+
+def run_inference(
+    model_path: str,
+    test_regex: str,
+    device: str = 'cpu',
+    output_dir: str = '../inference',
+    selection: str = "protein",
+):
+    model, config = load_model(Path(model_path), device=device)
+    for input_file in glob.glob(test_regex):
+        print(f"Running inference on {input_file}")
+        if input_file.endswith('.npz'):
+            batches, dataset = prepare_dataset(np.load(input_file, allow_pickle=True), r_max=config.get('r_max'))
+        else:
+            batches, dataset = build_input_data(input_file, traj_files=[], selection=selection, r_max=config.get('r_max'))
+        cs = []
+        for batch in tqdm(batches):
+            try:
+                for v in batch.values():
+                    if isinstance(v, torch.Tensor):
+                        v.to(device)
+                cs.append(evaluate(
+                    model=model,
+                    batch=batch,
+                    node_out_keys=[AtomicDataDict.NODE_OUTPUT_KEY]
+                )[AtomicDataDict.NODE_OUTPUT_KEY].cpu().numpy())
+            except:
+                pass
+        cs = np.stack(cs, axis=0)
+        ds = dict(dataset)
+        ds['chemical_shifts_pred'] = cs
+        os.makedirs(output_dir, exist_ok=True)
+        np.savez(os.path.join(output_dir, basename(input_file)), **ds)
