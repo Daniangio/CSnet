@@ -52,6 +52,10 @@ def build_dataset(
             selection="protein",
         ):
             if ds is not None:
+                ds.update({
+                    "temp": np.array([row.temp]),
+                    "ph": np.array([row.ph]),
+                })
                 np.savez(npz_file, **ds)
                 print(f"{npz_file} dataset saved.")
 
