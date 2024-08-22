@@ -5,6 +5,7 @@ media/
 inference/
 temp/
 .vscode/
+config/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

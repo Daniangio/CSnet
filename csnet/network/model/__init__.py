@@ -1,5 +1,5 @@
-from ._nmr import NMRModel
+from ._model import Model
 
 __all__ = [
-    NMRModel,
+    Model,
 ]
