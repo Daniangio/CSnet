@@ -43,7 +43,7 @@ def plot_inference(atom_names, pred, target, figsize=(10,8)):
     # Display the plot
     plt.show()
 
-def plot_violin(atom_names, data_list, ds_names, title, figsize=(10,8), overlap_same: bool = False):
+def plot_violin(atom_names, data_list, ds_names, title, figsize=None, overlap_same: bool = False):
     plt.rcParams['axes.prop_cycle'] = plt.cycler(color=[
         '#4053D3',
         '#DDB310',
@@ -53,7 +53,10 @@ def plot_violin(atom_names, data_list, ds_names, title, figsize=(10,8), overlap_
         '#00B25D',
         '#CACACA',
     ])
-    plt.figure(figsize=figsize)
+    if figsize is not None:
+        fig = plt.figure(figsize=figsize)
+    else:
+        fig = plt.figure()
 
     labels = []
     def add_label(violin, label):
@@ -94,15 +97,18 @@ def plot_violin(atom_names, data_list, ds_names, title, figsize=(10,8), overlap_
     # Adding labels and legend
     # set style for the axes
     if overlap_same:
-        plt.xticks(np.arange(1, len(atom_names) + 1), labels=atom_names)
+        plt.xticks(np.arange(1, len(atom_names) + 1), labels=atom_names, rotation=90)
         plt.xlim(0.25, len(atom_names) + 0.75)
     else:
-        plt.xticks(np.arange(1, (i +  1) * len(atom_names) + 1), labels=np.repeat(atom_names, (i + 1)))
+        plt.xticks(np.arange(1, (i +  1) * len(atom_names) + 1), labels=np.repeat(atom_names, (i + 1)), rotation=90)
         plt.xlim(0.25, (i +  1) * len(atom_names) + 0.75)
     plt.xlabel('Atom')
     plt.legend(*zip(*labels))
     
     plt.title(title)
+    if figsize is None:
+        fig.set_size_inches(len(atom_names), 8, forward=True)
+        fig.set_dpi(100)
 
     # Display the plot
     plt.show()

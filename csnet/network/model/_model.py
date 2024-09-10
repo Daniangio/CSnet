@@ -44,9 +44,6 @@ def Model(
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
     }
 
-    if initialize and any([ds.graph_fields is not None for ds in dataset.datasets]):
-        config[AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY] = dataset[0][AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY]
-
     layers.update(
         {
             "interaction": (
@@ -56,7 +53,7 @@ def Model(
                     edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
                     edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
                     out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-                    output_hidden_irreps=True,
+                    output_mul="hidden",
                 ),
             ),
             "pooling": (

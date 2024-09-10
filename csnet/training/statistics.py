@@ -70,21 +70,24 @@ def build_config_params(statistics: dict, config_root: str):
     for type_name in type_names:
         txt += f'  - {type_name}\n'
 
-    with open(os.path.join(config_root, 'type_names.yaml'), 'w') as f:
-        f.write(txt)
-
-    avg_feat_values = []
+    feat_stats = []
     for index in range(len(DataDict.CHEMICAL_SPECIES2ATOM_TYPE_LIST())):
         try:
             avg = statistics[index].value.mean()
+            std = statistics[index].value.std()
         except:
             avg = 0.
-        avg_feat_values.append(avg)
-    avg_feat_values=np.nan_to_num(np.array(avg_feat_values))
+            std = 0.
+        feat_stats.append([avg, std])
+    feat_stats=np.nan_to_num(np.array(feat_stats))
 
-    txt = 'per_type_bias:\n'
-    for avg_feat_value, type_name in zip(avg_feat_values, type_names):
-        txt += f"  - {avg_feat_value: <20} # {type_name}\n"
-        #txt += f'  - {}   #{type_name}\n'
-    with open(os.path.join(config_root, 'per_type_bias.yaml'), 'w') as f:
+    txt += '\n\nper_type_bias:\n'
+    for avg, type_name in zip(feat_stats[:, 0], type_names):
+        txt += f"  - {avg: <20} # {type_name}\n"
+    
+    txt += '\n\nper_type_std:\n'
+    for std, type_name in zip(feat_stats[:, 1], type_names):
+        txt += f"  - {std: <20} # {type_name}\n"
+     
+    with open(os.path.join(config_root, 'per_type_stats.yaml'), 'w') as f:
         f.write(txt)
