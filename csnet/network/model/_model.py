@@ -5,11 +5,11 @@ from e3nn import o3
 from geqtrain.data import AtomicDataDict, AtomicDataset
 from geqtrain.nn import (
     SequentialGraphNetwork,
-)
-from csnet.network.nn import (
     EmbeddingNodeAttrs,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
+)
+from csnet.network.nn import (
     InteractionModule,
     EdgewiseReduce,
     ReadoutModule,

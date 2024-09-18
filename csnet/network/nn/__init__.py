@@ -1,6 +1,3 @@
-from ._node import EmbeddingNodeAttrs
-from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs
-from ._graph import EmbeddingGraphAttrs
 from ._edgewise import EdgewiseReduce
 from ._scale import PerTypeScaleModule
 from ._fc import ScalarMLPFunction
@@ -12,10 +9,6 @@ from .radial_basis import BesselBasis, BesselBasisVec
 
 
 __all__ = [
-    EmbeddingNodeAttrs,
-    SphericalHarmonicEdgeAngularAttrs,
-    BasisEdgeRadialAttrs,
-    EmbeddingGraphAttrs,
     EdgewiseReduce,
     InteractionModule,
     ReadoutModule,
