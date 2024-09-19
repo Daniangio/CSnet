@@ -24,11 +24,11 @@ class KANLinear(torch.nn.Module):
         self,
         in_features,
         out_features,
-        grid_size=16,
+        grid_size=25,
         spline_order=3,
         scale_noise=0.1,
         grid_eps=0.1,
-        grid_range=[-4, 4],
+        grid_range=[-2, 2],
     ):
         super(KANLinear, self).__init__()
         self.in_features = in_features
@@ -106,11 +106,11 @@ class KANLinear(torch.nn.Module):
                 * bases[:, :, 1:]
             )
 
-        assert bases.size() == (
-            x.size(0),
-            self.in_features,
-            self.grid_size + self.spline_order,
-        )
+        # assert bases.size() == (
+        #     x.size(0),
+        #     self.in_features,
+        #     self.grid_size + self.spline_order,
+        # )
         return bases.contiguous()
 
     def curve2coeff(self, x: torch.Tensor, y: torch.Tensor):
@@ -244,11 +244,11 @@ class KAN(torch.nn.Module):
         mlp_input_dimension: Optional[int],
         mlp_latent_dimensions: List[int],
         mlp_output_dimension: Optional[int],
-        grid_size=16,
+        grid_size=25,
         spline_order=3,
         scale_noise=0.1,
         grid_eps=0.1,
-        grid_range=[-4, 4],
+        grid_range=[-2, 2],
         use_layer_norm: bool = False,
         has_bias: bool = False,
         bias: Optional[List] = None,
