@@ -92,6 +92,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         bias: Optional[List] = None,
         zero_init_last_layer_weights: bool = False,
         dropout: Optional[float] = None,
+        dampen: bool = False,
     ):
         super().__init__()
 
@@ -155,7 +156,6 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
             with torch.no_grad():
                 torch.nn.init.orthogonal_(lin_layer.weight, gain=norm_const)
-                # lin_layer.weight = lin_layer.weight.normal_(0, norm_const / sqrt(float(h_in)))
                 if lin_layer.bias is not None:
                     if is_last_layer and bias is not None:
                         lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)
@@ -179,6 +179,10 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             sequential_dict["dropout"] = torch.nn.Dropout(dropout)
 
         self.sequential = torch.nn.Sequential(sequential_dict)
+
+        if dampen:
+            for p in self.parameters():
+                p.tag = 'dampen'
 
     def forward(self, x):
         return self.sequential(x)

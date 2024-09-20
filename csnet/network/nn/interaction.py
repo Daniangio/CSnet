@@ -11,11 +11,12 @@ from einops import rearrange
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
+from csnet.network.nn import ScalarMLPFunction
+
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import (
     GraphModuleMixin,
     SO3_LayerNorm,
-    ScalarMLPFunction,
 )
 from geqtrain.nn.allegro import (
     Linear,
@@ -583,6 +584,7 @@ class InteractionLayer(torch.nn.Module):
             mlp_output_dimension=self.env_embed_multiplicity * self.head_dim,
             mlp_nonlinearity = None,
             zero_init_last_layer_weights= True,
+            dampen = True,
         ) if parent.use_attention else None
 
         # Take the node attrs and obtain a query matrix
@@ -592,6 +594,7 @@ class InteractionLayer(torch.nn.Module):
             mlp_output_dimension = self.env_embed_multiplicity * self.head_dim,
             mlp_nonlinearity = None,
             zero_init_last_layer_weights = True,
+            dampen = True,
         ) if parent.use_attention else None
 
         self.latent_mlp = latent_mlp
