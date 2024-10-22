@@ -17,7 +17,7 @@ from typing import Dict, Generator
 from os.path import basename
 from csnet.training.nmr import NMR, JOIN_CHAR
 from geqtrain.data import AtomicDataDict
-from geqtrain.scripts.evaluate import load_model, evaluate
+from geqtrain.scripts.evaluate import load_model
 
 
 ADJUST_ATOM_NAMES = {
@@ -31,6 +31,7 @@ def build_dataset(
     cs_input_folder: str,
     output_folder: str,
 ):
+    print(f"Building dataset info...")
     df = build_info(
         pdb_input_folder=pdb_input_folder,
         cs_input_folder=cs_input_folder,
@@ -204,13 +205,13 @@ def get_dataset(
     cs_df.loc[cs_df.Val_std > 0.1, "Val"] = np.nan # Drop nmr assignments with high variability
 
     heavy_atoms_idcs = np.argwhere([atom_name.startswith('H') for atom_name in ds.get("atom_names")]).flatten()
-    discard_atom_idcs = get_atom_idcs_with_high_rmsf(ds.get("coords"), heavy_atoms_idcs, mol, rmsf_threshold=rmsf_threshold)
+    discard_atom_idcs = get_atom_idcs_with_high_rmsf(ds.get(AtomicDataDict.POSITIONS_KEY), heavy_atoms_idcs, mol, rmsf_threshold=rmsf_threshold)
 
     # Extract chemical shifts
     cs = cs_df.Val.values.astype(np.float32)
     if discard_atom_idcs is not None:
         cs[discard_atom_idcs] = np.nan
-    cs = np.repeat(cs[None, ...], len(ds.get("coords")), axis=0)
+    cs = np.repeat(cs[None, ...], len(ds.get(AtomicDataDict.POSITIONS_KEY)), axis=0)
 
     # Build dataset
     ds.update({
@@ -219,12 +220,14 @@ def get_dataset(
 
     yield ds
 
-def get_structure(pdb_file, traj_files = [], selection="all"):
+def get_structure(topology, trajectories = [], selection=None):
     try:
-        u = mda.Universe(pdb_file, *traj_files)
+        u = mda.Universe(topology, *trajectories)
+        if selection is None:
+            selection = "all"
         mol = u.select_atoms(selection)
     except Exception as e:
-        raise Exception (f"Could not load {pdb_file}") from e
+        raise Exception (f"Could not load {topology}") from e
 
     atom_resnumbers = []
     atom_resnames = []
@@ -280,8 +283,8 @@ def get_structure(pdb_file, traj_files = [], selection="all"):
 
     # Build dataset
     ds = {
-        "coords": coords[:, keep_idcs],
-        "atom_types": atom_types[keep_idcs],
+        AtomicDataDict.POSITIONS_KEY: coords[:, keep_idcs],
+        AtomicDataDict.NODE_TYPE_KEY: atom_types[keep_idcs],
         "atom_resnumbers": atom_resnumbers[keep_idcs],
         "atom_resnames": atom_resnames[keep_idcs],
         "atom_names": atom_names[keep_idcs],
