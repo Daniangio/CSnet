@@ -6,35 +6,46 @@ from .._keys import *  # noqa: F403, F401
 from .. import _keys
 
 
-def get_atom_type(atom_resname, atom_name, element=None, verbose=False):
-    atom2atom_type = ATOM2ATOM_TYPE()
-    atom_type = atom2atom_type.get((atom_resname, atom_name), atom2atom_type.get(element, None))
+def get_atom_type(atom_resname, atom_name, element=None, verbose=False, method='full'):
+    atom2atom_type = ATOM2ATOM_TYPE(method)
+    if method in ['full', 'reduced']:
+        atom_type = atom2atom_type.get((atom_resname, atom_name), atom2atom_type.get(element, None))
+    elif method == 'base':
+        atom_type = atom2atom_type.get(element, None)
+    else:
+        raise Exception(f'Unrecognized method "{method}". Use one among ["full", "reduced", "base"]')
     if atom_type is None:
         if verbose:
             print(f"Unrecognized atom type for {atom_resname}, {atom_name}, {element}.")
         return atom2atom_type.get("X")
     return atom_type
 
-def get_species(key, chemical_species):
+def get_species(key, chemical_species, method):
         
     def format(resname, chemical_species):
         return f"{resname}.{chemical_species}"
     
-    if isinstance(key, tuple):
+    if method == 'full' and isinstance(key, tuple):
         return format(key[0], chemical_species)
+    if method == 'base' and isinstance(key, tuple):
+        return None
     return chemical_species
 
-def CHEMICAL_SPECIES2ATOM_TYPE_LIST():
+def CHEMICAL_SPECIES2ATOM_TYPE_LIST(method):
     chemical_species2atom_type_set = set()
     for key, chemical_species in ATOM2CHEMICAL_SPECIES.items():
-        chemical_species2atom_type_set.add(get_species(key, chemical_species))
+        species = get_species(key, chemical_species, method)
+        if species is not None:
+            chemical_species2atom_type_set.add(species)
     return sorted(list(chemical_species2atom_type_set))
 
-def ATOM2ATOM_TYPE():
-    chemical_species2atom_type_list = CHEMICAL_SPECIES2ATOM_TYPE_LIST()
+def ATOM2ATOM_TYPE(method):
+    chemical_species2atom_type_list = CHEMICAL_SPECIES2ATOM_TYPE_LIST(method)
     atom2atom_type = {}
     for key, chemical_species in ATOM2CHEMICAL_SPECIES.items():
-        atom2atom_type[key] = chemical_species2atom_type_list.index(get_species(key, chemical_species))
+        species = get_species(key, chemical_species, method)
+        if species is not None:
+            atom2atom_type[key] = chemical_species2atom_type_list.index(species)
     return {k: v for k,v in sorted(atom2atom_type.items(), key=lambda x: x[1])}
 
 ATOM2CHEMICAL_SPECIES = {

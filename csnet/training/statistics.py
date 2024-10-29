@@ -64,14 +64,14 @@ def plot_distribution(statistics: dict, resname: str, atomname: str, src: str = 
     except:
         pass
 
-def build_config_params(statistics: dict, config_root: str):
+def build_config_params(statistics: dict, config_root: str, confname: str, method='full'):
     txt = 'type_names:\n'
-    type_names = ['-'.join(k) if isinstance(k, tuple) else k for k in DataDict.CHEMICAL_SPECIES2ATOM_TYPE_LIST()]
+    type_names = ['-'.join(k) if isinstance(k, tuple) else k for k in DataDict.CHEMICAL_SPECIES2ATOM_TYPE_LIST(method)]
     for type_name in type_names:
         txt += f'  - {type_name}\n'
 
     feat_stats = []
-    for index in range(len(DataDict.CHEMICAL_SPECIES2ATOM_TYPE_LIST())):
+    for index in range(len(DataDict.CHEMICAL_SPECIES2ATOM_TYPE_LIST(method))):
         try:
             avg = statistics[index].value.mean()
             std = statistics[index].value.std()
@@ -89,5 +89,5 @@ def build_config_params(statistics: dict, config_root: str):
     for std, type_name in zip(feat_stats[:, 1], type_names):
         txt += f"  - {std: <20} # {type_name}\n"
      
-    with open(os.path.join(config_root, 'per_type_stats.yaml'), 'w') as f:
+    with open(os.path.join(config_root, confname), 'w') as f:
         f.write(txt)
