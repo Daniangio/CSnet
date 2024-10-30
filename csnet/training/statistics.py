@@ -22,7 +22,7 @@ def get_npz_statistics(
         x = ds[feat]
         batches = len(x)
         x = x.flatten()
-        idcs = np.repeat(ds[type], batches)
+        idcs = np.tile(ds[type], batches)
         all_x.append(x)
         all_idcs.append(idcs)
 
@@ -46,9 +46,9 @@ def get_npz_statistics(
     
     return df_dict
 
-def plot_distribution(statistics: dict, resname: str, atomname: str, src: str = 'true'):
+def plot_distribution(statistics: dict, resname: str, atomname: str, src: str = 'true', method='full'):
     try:
-        index = DataDict.get_atom_type(resname, atomname)
+        index = DataDict.get_atom_type(resname, atomname, method=method)
         data = statistics[index]
         if len(data) == 0:
             return
