@@ -16,6 +16,9 @@ def get_npz_statistics(
     filenames = []
     all_x = []
     all_idcs = []
+    all_atom_names = []
+    all_resnames = []
+    print("Starting analysis...")
     for filename in glob.glob(os.path.join(npz_folder, "*.npz")):
         filenames.append('.'.join(basename(filename).split('.')[:-1]))
         ds = np.load(filename, allow_pickle=True)
@@ -23,37 +26,46 @@ def get_npz_statistics(
         batches = len(x)
         x = x.flatten()
         idcs = np.tile(ds[type], batches)
+        atom_names = np.tile(ds['atom_names'], batches)
+        resnames = np.tile(ds['atom_resnames'], batches)
         all_x.append(x)
         all_idcs.append(idcs)
+        all_atom_names.append(atom_names)
+        all_resnames.append(resnames)
 
     df_dict: dict[str, pd.DataFrame] = {}
     print(f"{len(filenames)} files analysed.")
-    for filename, x, idcs in zip(filenames, all_x, all_idcs):
+    print("Computing statistics...")
+    for filename, x, idcs, atom_names, resnames in zip(filenames, all_x, all_idcs, all_atom_names, all_resnames):
         for index in np.unique(idcs):
-            df: pd.DataFrame = df_dict.get(index, None)
             fltr = idcs==index
             value = x[fltr]
             nan_fltr = ~np.isnan(value)
             update_df = pd.DataFrame(data={
                 'filename': [filename] * sum(nan_fltr),
+                'atom_name': atom_names[fltr][nan_fltr],
+                'resname': resnames[fltr][nan_fltr],
                 'value': value[nan_fltr],
                 })
+            df: pd.DataFrame = df_dict.get(index, None)
             if df is None:
                 df = update_df
             else:
                 df = pd.concat([df, update_df], ignore_index=True)
             df_dict[index] = df
-    
+    print("Completed!")
     return df_dict
 
-def plot_distribution(statistics: dict, resname: str, atomname: str, src: str = 'true', method='full'):
+def plot_distribution(statistics: dict, resname: str, atomname: str, src: str = 'true', index=None, method='full'):
     try:
-        index = DataDict.get_atom_type(resname, atomname, method=method)
+        if index is None:
+            index = DataDict.get_atom_type(resname, atomname, method=method)
+            print(index)
         data = statistics[index]
         if len(data) == 0:
             return
         fig = px.histogram(
-            data,
+            data[data['resname'] == resname],
             x='value',
             color='filename',
             nbins=100,
@@ -64,9 +76,10 @@ def plot_distribution(statistics: dict, resname: str, atomname: str, src: str = 
     except:
         pass
 
-def build_config_params(statistics: dict, config_root: str, confname: str, method='full'):
+def build_config_params(statistics: dict, config_root: str, confname: str, type_names=None, method='full'):
     txt = 'type_names:\n'
-    type_names = ['-'.join(k) if isinstance(k, tuple) else k for k in DataDict.CHEMICAL_SPECIES2ATOM_TYPE_LIST(method)]
+    if type_names is None:
+        type_names = ['-'.join(k) if isinstance(k, tuple) else k for k in DataDict.CHEMICAL_SPECIES2ATOM_TYPE_LIST(method)]
     for type_name in type_names:
         txt += f'  - {type_name}\n'
 
