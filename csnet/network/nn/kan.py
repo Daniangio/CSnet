@@ -23,11 +23,11 @@ class KANLinear(torch.nn.Module):
         self,
         in_features,
         out_features,
-        grid_size=25,
+        grid_size=16,
         spline_order=3,
         scale_noise=0.1,
         grid_eps=0.1,
-        grid_range=[-2, 2],
+        grid_range=[-1, 1],
     ):
         super(KANLinear, self).__init__()
         self.in_features = in_features
@@ -243,11 +243,11 @@ class KAN(torch.nn.Module):
         mlp_input_dimension: Optional[int],
         mlp_latent_dimensions: List[int],
         mlp_output_dimension: Optional[int],
-        grid_size=25,
+        grid_size=16,
         spline_order=3,
         scale_noise=0.1,
         grid_eps=0.1,
-        grid_range=[-2, 2],
+        grid_range=[-1, 1],
         use_layer_norm: bool = False,
         has_bias: bool = False,
         bias: Optional[List] = None,
