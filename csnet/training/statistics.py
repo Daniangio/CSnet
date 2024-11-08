@@ -18,6 +18,7 @@ def get_npz_statistics(
     all_idcs = []
     all_atom_names = []
     all_resnames = []
+    all_resnumbers = []
     print("Starting analysis...")
     for filename in glob.glob(os.path.join(npz_folder, "*.npz")):
         filenames.append('.'.join(basename(filename).split('.')[:-1]))
@@ -28,15 +29,17 @@ def get_npz_statistics(
         idcs = np.tile(ds[type], batches)
         atom_names = np.tile(ds['atom_names'], batches)
         resnames = np.tile(ds['atom_resnames'], batches)
+        resnumbers = np.tile(ds['atom_resnumbers'], batches)
         all_x.append(x)
         all_idcs.append(idcs)
         all_atom_names.append(atom_names)
         all_resnames.append(resnames)
+        all_resnumbers.append(resnumbers)
 
     df_dict: dict[str, pd.DataFrame] = {}
     print(f"{len(filenames)} files analysed.")
     print("Computing statistics...")
-    for filename, x, idcs, atom_names, resnames in zip(filenames, all_x, all_idcs, all_atom_names, all_resnames):
+    for filename, x, idcs, atom_names, resnames, resnumbers in zip(filenames, all_x, all_idcs, all_atom_names, all_resnames, all_resnumbers):
         for index in np.unique(idcs):
             fltr = idcs==index
             value = x[fltr]
@@ -46,6 +49,7 @@ def get_npz_statistics(
                 'atom_name': atom_names[fltr][nan_fltr],
                 'resname': resnames[fltr][nan_fltr],
                 'value': value[nan_fltr],
+                'resid': resnumbers[fltr][nan_fltr],
                 })
             df: pd.DataFrame = df_dict.get(index, None)
             if df is None:
@@ -68,8 +72,11 @@ def plot_distribution(statistics: dict, resname: str, atomname: str, src: str = 
             data[data['resname'] == resname],
             x='value',
             color='filename',
+            marginal="rug", # can be `box`, `violin`
+            hover_data=data.columns,
             nbins=100,
             title=f"{resname}-{atomname}",
+            
         )
         fig.show()
         fig.write_html(f"../media/{resname}-{atomname}-{src}.html")
