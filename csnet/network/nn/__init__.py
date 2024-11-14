@@ -5,7 +5,7 @@ from .interaction import InteractionModule
 from .readout import ReadoutModule
 from .so3 import SO3_LayerNorm
 from .kan import KAN
-from .radial_basis import BesselBasis, BesselBasisVec
+from .radial_basis import BesselBasis, BesselBasisVec, PolyBasisVec
 
 
 __all__ = [
@@ -18,4 +18,5 @@ __all__ = [
     ScalarMLPFunction,
     BesselBasis,
     BesselBasisVec,
+    PolyBasisVec,
 ]

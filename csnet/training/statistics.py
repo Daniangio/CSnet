@@ -64,7 +64,6 @@ def plot_distribution(statistics: dict, resname: str, atomname: str, src: str = 
     try:
         if index is None:
             index = DataDict.get_atom_type(resname, atomname, method=method)
-            print(index)
         data = statistics[index]
         if len(data) == 0:
             return
