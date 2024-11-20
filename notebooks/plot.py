@@ -43,7 +43,7 @@ def plot_inference(atom_names, pred, target, figsize=(10,8)):
     # Display the plot
     plt.show()
 
-def plot_violin(atom_names, data_list, ds_names, title, figsize=None, overlap_same: bool = False):
+def plot_violin(atom_names, data_list, ds_names, title, figsize=None, overlap_same: bool = False, ylim=None):
     plt.rcParams['axes.prop_cycle'] = plt.cycler(color=[
         '#4053D3',
         '#DDB310',
@@ -102,6 +102,8 @@ def plot_violin(atom_names, data_list, ds_names, title, figsize=None, overlap_sa
     else:
         plt.xticks(np.arange(1, (i +  1) * len(atom_names) + 1), labels=np.repeat(atom_names, (i + 1)), rotation=90)
         plt.xlim(0.25, (i +  1) * len(atom_names) + 0.75)
+    if ylim is not None:
+        plt.ylim(*ylim)
     plt.xlabel('Atom')
     plt.legend(*zip(*labels))
     
