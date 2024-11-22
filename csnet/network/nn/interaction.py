@@ -156,8 +156,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
     
         # - [optional] filter out_irreps l degrees
         if output_ls is None:
-            output_ls = out_irreps.ls
+            output_ls = out_irreps.ls + [0] 
         assert isinstance(output_ls, List)
+        assert all([(l in input_edge_eq_irreps.ls) for l in output_ls]), \
+            f"Required output ls {output_ls} cannot be computed using l_max={max(input_edge_eq_irreps.ls)}"
 
         # [optional] set out_irreps multiplicity
         if output_mul is None:
@@ -166,9 +168,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             if output_mul == 'hidden':
                 output_mul = self.latent_dim
         
-        out_irreps = o3.Irreps(
-            [(output_mul, ir) for _, ir in out_irreps if ir.l in [0] + output_ls]
-        )
+        out_irreps = o3.Irreps([(output_mul, ir) for _, ir in input_edge_eq_irreps if ir.l in output_ls])
 
         self.out_multiplicity = output_mul
 

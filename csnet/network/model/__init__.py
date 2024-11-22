@@ -1,9 +1,9 @@
-from ._model import Model
+from .cs_model import CSModel
 from ._rna_model import RNAModel
 from ._scale import PerTypeScale
 
 __all__ = [
-    Model,
+    CSModel,
     RNAModel,
     PerTypeScale,
 ]

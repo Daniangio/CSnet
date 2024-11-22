@@ -2,7 +2,9 @@ from typing import Optional
 import logging
 
 from e3nn import o3
-from geqtrain.data import AtomicDataDict, AtomicDataset
+from geqtrain.data import AtomicDataDict
+from torch.utils.data import ConcatDataset
+from geqtrain.model import update_config
 from geqtrain.nn import (
     SequentialGraphNetwork,
     EmbeddingNodeAttrs,
@@ -16,26 +18,15 @@ from csnet.network.nn import (
 )
 
 
-def Model(
-    config, initialize: bool, dataset: Optional[AtomicDataset] = None
+def CSModel(
+    config, initialize: bool, dataset: Optional[ConcatDataset] = None
 ) -> SequentialGraphNetwork:
     """Base model architecture.
 
     """
     logging.debug("Building model")
 
-    if "l_max" in config:
-        l_max = int(config["l_max"])
-        parity_setting = config.get("parity", "o3_full")
-        assert parity_setting in ("o3_full", "so3")
-        irreps_edge_sh = repr(
-            o3.Irreps.spherical_harmonics(
-                l_max, p=(1 if parity_setting == "so3" else -1)
-            )
-        )
-        # check consistency
-        assert config.get("irreps_edge_sh", irreps_edge_sh) == irreps_edge_sh
-        config["irreps_edge_sh"] = irreps_edge_sh
+    update_config(config)
 
     layers = {
         # -- Encode --
@@ -54,6 +45,7 @@ def Model(
                     edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
                     out_field=AtomicDataDict.EDGE_FEATURES_KEY,
                     output_mul="hidden",
+                    output_ls=[0, 1],
                 ),
             ),
             "pooling": (
@@ -62,6 +54,14 @@ def Model(
                     field=AtomicDataDict.EDGE_FEATURES_KEY,
                     out_field=AtomicDataDict.NODE_FEATURES_KEY,
                     reduce=config.get("edge_reduce", "sum"),
+                ),
+            ),
+            "noise_head": (
+                ReadoutModule,
+                dict(
+                    field=AtomicDataDict.NODE_FEATURES_KEY,
+                    out_field=AtomicDataDict.NOISE,
+                    out_irreps=o3.Irreps("1x1o"),
                 ),
             ),
             "head": (

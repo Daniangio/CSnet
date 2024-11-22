@@ -40,8 +40,6 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 else in_irreps
             )
         )
-        self.out_irreps = out_irreps
-        self.out_irreps_muls = [ir.mul for ir in out_irreps]
 
         # check and init irreps
         my_irreps_in = {field: in_irreps}
@@ -88,19 +86,21 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 )
             self.reshape_back_features = inverse_reshape_irreps(eq_linear_output_irreps)
         else:
-            assert in_irreps.dim == self.n_scalars_in, (
-                    f"Module input contains features with irreps which are not scalars ({in_irreps})." +
-                    f"However, the irreps of the output is composed of scalars only ({out_irreps})."   +
-                    "Please remove non-scalar features from the input, which otherwise would remain unused." +
-                    f"If features come from InteractionModule, you can add the parameter 'output_hidden_ls=[0]' in the constructor"
-                )
+            # assert in_irreps.dim == self.n_scalars_in, (
+            #         f"Module input contains features with irreps which are not scalars ({in_irreps})." +
+            #         f"However, the irreps of the output is composed of scalars only ({out_irreps})."   +
+            #         "Please remove non-scalar features from the input, which otherwise would remain unused." +
+            #         f"If features come from InteractionModule, you can add the parameter 'output_hidden_ls=[0]' in the constructor"
+            #     )
             self.reshape_in = None
 
         self._resnet_update_coeff: Optional[torch.nn.Parameter] = None # init to None for jit
         if self.resnet:
             assert irreps_in[self.out_field] == out_irreps
             self._resnet_update_coeff = torch.nn.Parameter(torch.tensor([0.0]))
-        self.out_irreps_dim = self.out_irreps.dim
+        self.out_irreps      = out_irreps
+        self.out_irreps_dim  = out_irreps.dim
+        self.out_irreps_muls = [ir.mul for ir in out_irreps]
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         features = data[self.field]
