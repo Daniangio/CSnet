@@ -6,6 +6,7 @@ from .readout import ReadoutModule
 from .so3 import SO3_LayerNorm
 from .kan import KAN
 from .radial_basis import BesselBasis, BesselBasisVec, PolyBasisVec
+from ._variational_gp import VariationalGPModule
 
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     BesselBasis,
     BesselBasisVec,
     PolyBasisVec,
+    VariationalGPModule,
 ]
