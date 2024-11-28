@@ -6,7 +6,7 @@ from geqtrain.train._loss import SimpleLoss
 from geqtrain.data import AtomicDataDict
 
 
-class GPLoss(SimpleLoss):
+class GPLoss(SimpleLoss): # Marginal Log Likelihood
     """
     """
 
@@ -19,9 +19,9 @@ class GPLoss(SimpleLoss):
         self.likelihood = None
         self.mll = None
         
-    def init_loss(self, model, num_data):
+    def init_loss(self, model, num_data, obj=gpytorch.mlls.VariationalELBO, beta=0.05):
         self.likelihood = model.likelihood
-        self.mll = gpytorch.mlls.VariationalELBO(self.likelihood, model.gp_module, num_data=num_data)
+        self.obj = obj(self.likelihood, model.gp_module, num_data=num_data, beta=beta)
     
     def __call__(
         self,
@@ -33,8 +33,8 @@ class GPLoss(SimpleLoss):
         pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
 
         if has_nan:
-            not_nan_zeroes = (ref_key == ref_key).int() * not_zeroes
-            loss = -self.mll(pred_key, torch.nan_to_num(ref_key, nan=0.)) * not_nan_zeroes
+            not_nan_zeroes = ((ref_key == ref_key).int() * not_zeroes).flatten()
+            loss = -self.obj(pred_key, torch.nan_to_num(ref_key, nan=0.)) * not_nan_zeroes
             if mean:
                 return loss.sum() / not_nan_zeroes.sum()
             else:
@@ -42,7 +42,8 @@ class GPLoss(SimpleLoss):
                 loss[~not_nan_zeroes.bool()] = torch.nan
                 return loss
         else:
-            loss = -self.mll(pred_key, ref_key) * not_zeroes
+            not_zeroes = not_zeroes.flatten()
+            loss = -self.obj(pred_key, ref_key) * not_zeroes
             if mean:
                 return loss.mean(dim=-1).sum() / not_zeroes.sum()
             else:
@@ -67,6 +68,96 @@ class GPLoss(SimpleLoss):
             not_zeroes = torch.ones(*ref_key.shape[:max(1, len(ref_key.shape)-1)], device=ref_key.device).int()
         not_zeroes = not_zeroes.reshape(*([-1] + [1] * (len(ref_key.shape)-1)))
         return pred_key, ref_key, has_nan, not_zeroes
+
+
+class GPMAELoss(GPLoss):
+    """
+    """
+
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+    ):
+        super(GPLoss, self).__init__(func_name, params)
+    
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str,
+        mean: bool = True,
+    ):
+        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
+
+        if has_nan:
+            not_nan_zeroes = (ref_key == ref_key).int() * not_zeroes
+            loss = self.func(pred_key.mean.transpose(-1, -2), torch.nan_to_num(ref_key, nan=0.)) * not_nan_zeroes
+            if mean:
+                return loss.sum() / not_nan_zeroes.sum()
+            else:
+                loss = self.likelihood(loss).mean
+                loss[~not_nan_zeroes.bool()] = torch.nan
+                return loss
+        else:
+            loss = self.func(pred_key.mean.transpose(-1, -2), ref_key) * not_zeroes
+            if mean:
+                return loss.mean(dim=-1).sum() / not_zeroes.sum()
+            else:
+                return self.likelihood(loss).mean
+
+
+class GPdpllLoss(GPLoss): # Deep Predictive Log Likelihood
+    """
+    """
+
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+    ):
+        super(GPdpllLoss, self).__init__(func_name, params)
+        
+    def init_loss(self, model, num_data, obj=gpytorch.mlls.DeepPredictiveLogLikelihood, beta=0.05):
+        self.likelihood = model.likelihood
+        self.obj = obj(self.likelihood, model, num_data=num_data, beta=beta)
+
+
+class GPdpllMAELoss(GPdpllLoss):
+    """
+    """
+
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+    ):
+        super(GPdpllMAELoss, self).__init__(func_name, params)
+    
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str,
+        mean: bool = True,
+    ):
+        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
+
+        if has_nan:
+            not_nan_zeroes = (ref_key == ref_key).int() * not_zeroes
+            loss = self.func(pred_key.mean[0], torch.nan_to_num(ref_key, nan=0.)) * not_nan_zeroes
+            if mean:
+                return loss.sum() / not_nan_zeroes.sum()
+            else:
+                loss = self.likelihood(loss).mean
+                loss[~not_nan_zeroes.bool()] = torch.nan
+                return loss
+        else:
+            loss = self.func(pred_key.mean[0], ref_key) * not_zeroes
+            if mean:
+                return loss.mean(dim=-1).sum() / not_zeroes.sum()
+            else:
+                return self.likelihood(loss).mean
 
 
 class NoiseLoss(SimpleLoss):

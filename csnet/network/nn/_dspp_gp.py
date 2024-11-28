@@ -1,7 +1,5 @@
-import math
 from typing import Optional, Union
 import torch
-import gpytorch
 
 from e3nn.o3 import Irreps
 from e3nn.util.jit import compile_mode
@@ -10,9 +8,12 @@ from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
 from geqtrain.utils import add_tags_to_parameters
 
+import gpytorch
+from gpytorch.models.deep_gps.dspp import DSPPLayer, DSPP
+
 
 @compile_mode("script")
-class VariationalGPModule(GraphModuleMixin, torch.nn.Module):
+class DSPPGPModule(GraphModuleMixin, DSPP):
     """
         ScaleModule applies a scaling transformation to a specified field of the input data.
         
@@ -35,30 +36,32 @@ class VariationalGPModule(GraphModuleMixin, torch.nn.Module):
         out_field: str,
         out_irreps: Optional[Union[Irreps, str]] = None,
         num_inducing_points: int = 512,
+        Q = 10,
     ):
-        super().__init__()
-        self.func = func
-        self.field = field
-        self.out_field = out_field
-
         # check and init irreps
         func_irreps_out = func.irreps_out
-        in_irreps = func_irreps_out[self.field]
+        in_irreps = func_irreps_out[field]
         if out_irreps is None:
-            out_irreps = func_irreps_out[self.field]
+            out_irreps = func_irreps_out[field]
         else:
             out_irreps = out_irreps if isinstance(out_irreps, Irreps) else Irreps(out_irreps)
 
-        self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
-
-        self.gp_module = GaussianProcessModule(
+        head = DSPPHiddenModule(
             input_dim=in_irreps.dim,
             output_dim=out_irreps.dim,
             num_inducing_points=num_inducing_points,
+            Q=Q, # Number of quadrature sites (see paper for a description of this. 5-10 generally works well).
         )
 
         # This module will scale the NN features so that they're nice values
-        self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(-10., 10.)
+        # scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(-10., 10.)
+
+        super().__init__(Q)
+        self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
+        self.func = func
+        self.field = field
+        self.out_field = out_field
+        self.head = head
 
         func_irreps_out.update({self.out_field: out_irreps})
         self._init_irreps(
@@ -72,19 +75,22 @@ class VariationalGPModule(GraphModuleMixin, torch.nn.Module):
         data = self.func(data)
         features = data[self.field]
         
-        features = self.scale_to_bounds(features)
-        # This next line makes it so that we learn a GP for each feature
-        # features = features.transpose(-1, -2).unsqueeze(-1)
-        res = self.gp_module(features)
+        # features = self.scale_to_bounds(features)
+        res = self.head(features)
 
         data[self.out_field] = res
 
         return data
 
+    # Implement __call__ to skip output validation, which does not accept dict as output
+    def __call__(self, *inputs, **kwargs):
+        return self.forward(*inputs, **kwargs)
+
 
 @compile_mode("script")
-class GaussianProcessModule(gpytorch.models.ApproximateGP):
-    def __init__(self, input_dim, output_dim, num_inducing_points):
+class DSPPHiddenModule(DSPPLayer):
+# class GaussianProcessModule(gpytorch.models.ApproximateGP):
+    def __init__(self, input_dim, output_dim, num_inducing_points, Q=8):
 
         if output_dim > 1:
             inducing_points = torch.randn(num_inducing_points, input_dim)
@@ -94,7 +100,16 @@ class GaussianProcessModule(gpytorch.models.ApproximateGP):
             batch_shape = torch.Size([])
 
         # Variational distribution for the inducing points
-        variational_distribution = gpytorch.variational.CholeskyVariationalDistribution(
+        # --- Option 1 ---
+
+        # # variational_distribution = gpytorch.variational.CholeskyVariationalDistribution(
+        # #     num_inducing_points=num_inducing_points,
+        # #     batch_shape=batch_shape,
+        # # )
+
+        # --- Option 2 ---
+
+        variational_distribution = gpytorch.variational.MeanFieldVariationalDistribution(
             num_inducing_points=num_inducing_points,
             batch_shape=batch_shape,
         )
@@ -106,10 +121,11 @@ class GaussianProcessModule(gpytorch.models.ApproximateGP):
             variational_distribution=variational_distribution,
             learn_inducing_locations=True
         )
-        super(GaussianProcessModule, self).__init__(variational_strategy)
+        super(DSPPHiddenModule, self).__init__(variational_strategy, input_dim, output_dim, Q)
 
         # Mean and covariance modules
-        self.mean_module = gpytorch.means.LinearMean(input_dim, batch_shape=batch_shape)
+        # self.mean_module = gpytorch.means.LinearMean(input_dim, batch_shape=batch_shape)
+        self.mean_module = gpytorch.means.ConstantMean(batch_shape=batch_shape)
 
         # self.covar_module = gpytorch.kernels.ScaleKernel(
         #     gpytorch.kernels.RBFKernel(
@@ -119,13 +135,22 @@ class GaussianProcessModule(gpytorch.models.ApproximateGP):
         #     batch_shape=batch_shape, ard_num_dims=None
         # )
 
-        self.covar_module = gpytorch.kernels.AdditiveStructureKernel(
-            gpytorch.kernels.RBFKernel(
-                batch_shape=batch_shape,
+        self.covar_module = gpytorch.kernels.ScaleKernel(
+            gpytorch.kernels.MaternKernel(
                 ard_num_dims=input_dim,
+                batch_shape=batch_shape,
             ),
-            num_dims=input_dim,
+            batch_shape=batch_shape,
+            ard_num_dims=None,
         )
+        
+        # self.covar_module = gpytorch.kernels.AdditiveStructureKernel(
+        #     gpytorch.kernels.RBFKernel(
+        #         batch_shape=batch_shape,
+        #         ard_num_dims=input_dim,
+        #     ),
+        #     num_dims=input_dim,
+        # )
 
         add_tags_to_parameters(self, 'strengthen')
 

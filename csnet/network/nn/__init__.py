@@ -7,6 +7,7 @@ from .so3 import SO3_LayerNorm
 from .kan import KAN
 from .radial_basis import BesselBasis, BesselBasisVec, PolyBasisVec
 from ._variational_gp import VariationalGPModule
+from ._dspp_gp import DSPPGPModule
 
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     BesselBasisVec,
     PolyBasisVec,
     VariationalGPModule,
+    DSPPGPModule,
 ]
