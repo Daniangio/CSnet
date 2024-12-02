@@ -139,7 +139,6 @@ class GaussianBasis(nn.Module):
         return torch.einsum("i,ji->ji", self.gaussian_weights, self.gaussian_values[idcs])
 
 
-
 class PolyBasisVec(nn.Module):
 
     def __init__(self, r_max, num_basis=8, accuracy=1e-3, trainable=True):

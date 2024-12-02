@@ -1,23 +1,24 @@
-from geqtrain.nn import GraphModuleMixin
+import logging
+from typing import Optional
+from torch.utils.data import ConcatDataset
+from geqtrain.nn import GraphModuleMixin, SequentialGraphNetwork
 from geqtrain.data import AtomicDataDict
+
 from csnet.network.nn import DSPPGPModule
 
 
-def DSPPGP(model: GraphModuleMixin, config) -> DSPPGPModule:
-    r"""Compute dipole moment.
+def DSPPGP(model: GraphModuleMixin, config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> DSPPGPModule:
+    logging.info("--- Building DSPPGP Module ---")
 
-    Args:
-        model: the model to wrap. Must have ``AtomicDataDict.NODE_OUTPUT_KEY`` as an output.
+    layers = {
+        "wrapped_model": model,
+        "dsppgp": (DSPPGPModule, dict(
+            field=AtomicDataDict.NODE_OUTPUT_KEY,
+            out_field=AtomicDataDict.NODE_OUTPUT_KEY,
+        )),
+    }
 
-    Returns:
-        A ``DSPPGPModule`` wrapping ``model``.
-    """
-    
-    return DSPPGPModule(
-        func=model,
-        field=AtomicDataDict.NODE_OUTPUT_KEY,
-        out_field=AtomicDataDict.NODE_OUTPUT_KEY,
-        out_irreps=config.get('out_irreps', None),
-        num_inducing_points=config.get('num_inducing_points', 512),
-        Q=config.get('Q', 1),
+    return SequentialGraphNetwork.from_parameters(
+        shared_params=config,
+        layers=layers,
     )

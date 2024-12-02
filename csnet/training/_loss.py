@@ -4,6 +4,7 @@ import torch.nn
 
 from geqtrain.train._loss import SimpleLoss
 from geqtrain.data import AtomicDataDict
+from geqtrain.nn import SequentialGraphNetwork
 
 
 class GPLoss(SimpleLoss): # Marginal Log Likelihood
@@ -118,9 +119,12 @@ class GPdpllLoss(GPLoss): # Deep Predictive Log Likelihood
     ):
         super(GPdpllLoss, self).__init__(func_name, params)
         
-    def init_loss(self, model, num_data, obj=gpytorch.mlls.DeepPredictiveLogLikelihood, beta=0.05):
-        self.likelihood = model.likelihood
-        self.obj = obj(self.likelihood, model, num_data=num_data, beta=beta)
+    def init_loss(self, model: SequentialGraphNetwork, num_data, obj=gpytorch.mlls.DeepPredictiveLogLikelihood, beta=0.05):
+        try:
+            self.likelihood = model.get_param('likelihood')
+        except AttributeError as e:
+            raise AttributeError("Are you missing a Gaussian Process module in your modules?") from e
+        self.obj = obj(self.likelihood, model.get_module('dsppgp'), num_data=num_data, beta=beta)
 
 
 class GPdpllMAELoss(GPdpllLoss):

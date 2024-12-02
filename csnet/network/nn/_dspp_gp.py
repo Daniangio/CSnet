@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import List, Optional, Union
 import torch
 
 from e3nn.o3 import Irreps
@@ -31,21 +31,34 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
 
     def __init__(
         self,
-        func: GraphModuleMixin,
         field: str,
         out_field: str,
+        num_types: int,
         out_irreps: Optional[Union[Irreps, str]] = None,
-        num_inducing_points: int = 512,
-        Q = 10,
+        grid_range: Optional[List[float]] = None,
+        num_inducing_points: Optional[int] = None,
+        Q = None,
+        # Scaling
+        per_type_bias: Optional[List] = None,
+        per_type_std: Optional[List] = None,
+        # Other
+        irreps_in = None,
     ):
+        # Set defaults
+        if grid_range is None: grid_range = [-10., 10.]
+        if num_inducing_points is None: num_inducing_points = 512
+        if Q is None: Q = 1
+
         # check and init irreps
-        func_irreps_out = func.irreps_out
-        in_irreps = func_irreps_out[field]
+        in_irreps = irreps_in[field]
         if out_irreps is None:
-            out_irreps = func_irreps_out[field]
+            out_irreps = in_irreps[field]
         else:
             out_irreps = out_irreps if isinstance(out_irreps, Irreps) else Irreps(out_irreps)
 
+        # This module will scale the NN features so that they're nice values
+        scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(*grid_range)
+        
         head = DSPPHiddenModule(
             input_dim=in_irreps.dim,
             output_dim=out_irreps.dim,
@@ -53,32 +66,67 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
             Q=Q, # Number of quadrature sites (see paper for a description of this. 5-10 generally works well).
         )
 
-        # This module will scale the NN features so that they're nice values
-        # scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(-10., 10.)
-
         super().__init__(Q)
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
-        self.func = func
         self.field = field
         self.out_field = out_field
+        self.scale_to_bounds = scale_to_bounds
         self.head = head
 
-        func_irreps_out.update({self.out_field: out_irreps})
         self._init_irreps(
-            irreps_in=func.irreps_in,
+            irreps_in=irreps_in,
             my_irreps_in={AtomicDataDict.POSITIONS_KEY: Irreps("1o")},
-            irreps_out=func_irreps_out,
         )
+        self.irreps_out.update({self.out_field: out_irreps})
+
+        # Scaling
+        if per_type_bias is not None:
+            assert len(per_type_bias) == num_types, (
+                f"Expected per_type_bias to have length {num_types}, "
+                f"but got {len(per_type_bias)}"
+            )
+            per_type_bias = torch.tensor(per_type_bias, dtype=torch.float32)
+            self.per_type_bias = torch.nn.Parameter(per_type_bias.reshape(num_types, -1))
+        else:
+            self.per_type_bias = None
+        
+        if per_type_std is not None:
+            assert len(per_type_std) == num_types, (
+                f"Expected per_type_std to have length {num_types}, "
+                f"but got {len(per_type_std)}"
+            )
+            per_type_std = torch.tensor(per_type_std, dtype=torch.float32)
+            self.per_type_std = torch.nn.Parameter(per_type_std.reshape(num_types, -1))
+        else:
+            self.per_type_std = None
 
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        data = self.func(data)
         features = data[self.field]
         
-        # features = self.scale_to_bounds(features)
-        res = self.head(features)
+        features = self.scale_to_bounds(features)
+        features = self.head(features)
+        mean, covar = features.mean, features.covariance_matrix
 
-        data[self.out_field] = res
+        # Scaling
+        edge_center = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
+        center_species = data[AtomicDataDict.NODE_TYPE_KEY][edge_center].squeeze(dim=-1)
+
+        # Apply per-type std scaling if available
+        if self.per_type_std is not None:
+            scaling = self.per_type_std[center_species]
+            mean[:, edge_center] *= scaling
+
+            fltr = torch.combinations(edge_center, r=2)
+            scln = torch.combinations(scaling.flatten(), r=2).prod(dim=1)
+            covar=covar.clone()
+            covar[:, fltr[:, 0], fltr[:, 1]] *= scln
+
+        # Apply per-type bias if available
+        if self.per_type_bias is not None:
+            mean[:, edge_center] += self.per_type_bias[center_species]
+
+        data[self.out_field] = gpytorch.distributions.MultitaskMultivariateNormal(mean, covar)
 
         return data
 
