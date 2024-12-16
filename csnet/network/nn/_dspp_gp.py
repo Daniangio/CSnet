@@ -10,6 +10,7 @@ from geqtrain.utils import add_tags_to_parameters
 
 import gpytorch
 from gpytorch.models.deep_gps.dspp import DSPPLayer, DSPP
+from gpytorch.distributions import MultitaskMultivariateNormal, MultivariateNormal
 
 
 @compile_mode("script")
@@ -37,7 +38,7 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
         out_irreps: Optional[Union[Irreps, str]] = None,
         grid_range: Optional[List[float]] = None,
         num_inducing_points: Optional[int] = None,
-        Q = None,
+        num_quadrature_sites = 8,
         # Scaling
         per_type_bias: Optional[List] = None,
         per_type_std: Optional[List] = None,
@@ -47,7 +48,6 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
         # Set defaults
         if grid_range is None: grid_range = [-10., 10.]
         if num_inducing_points is None: num_inducing_points = 512
-        if Q is None: Q = 1
 
         # check and init irreps
         in_irreps = irreps_in[field]
@@ -57,20 +57,20 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
             out_irreps = out_irreps if isinstance(out_irreps, Irreps) else Irreps(out_irreps)
 
         # This module will scale the NN features so that they're nice values
-        scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(*grid_range)
+        # scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(*grid_range)
         
         head = DSPPHiddenModule(
             input_dim=in_irreps.dim,
             output_dim=out_irreps.dim,
             num_inducing_points=num_inducing_points,
-            Q=Q, # Number of quadrature sites (see paper for a description of this. 5-10 generally works well).
+            Q=num_quadrature_sites, # Number of quadrature sites (see paper for a description of this. 5-10 generally works well).
         )
 
-        super().__init__(Q)
+        super().__init__(num_quadrature_sites)
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
         self.field = field
         self.out_field = out_field
-        self.scale_to_bounds = scale_to_bounds
+        # self.scale_to_bounds = scale_to_bounds
         self.head = head
 
         self._init_irreps(
@@ -99,34 +99,38 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
             self.per_type_std = torch.nn.Parameter(per_type_std.reshape(num_types, -1))
         else:
             self.per_type_std = None
+        
+        self.distribution = MultitaskMultivariateNormal if out_irreps.dim > 1 else MultivariateNormal
 
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         features = data[self.field]
+        # Exclude non-center nodes to avoid having NaNs in loss
+        edge_center = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
+        features = features[edge_center]
         
-        features = self.scale_to_bounds(features)
+        # features = self.scale_to_bounds(features)
         features = self.head(features)
         mean, covar = features.mean, features.covariance_matrix
 
         # Scaling
-        edge_center = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
         center_species = data[AtomicDataDict.NODE_TYPE_KEY][edge_center].squeeze(dim=-1)
 
         # Apply per-type std scaling if available
         if self.per_type_std is not None:
-            scaling = self.per_type_std[center_species]
-            mean[:, edge_center] *= scaling
+            scaling = self.per_type_std[center_species].transpose(0, 1)
+            mean = mean * scaling
 
-            fltr = torch.combinations(edge_center, r=2)
-            scln = torch.combinations(scaling.flatten(), r=2).prod(dim=1)
+            fltr = torch.combinations(torch.arange(covar.size(-1), device=covar.device), r=2)
+            scln = torch.combinations(scaling.flatten(), r=2).prod(dim=1, keepdim=True).transpose(0, 1)
             covar=covar.clone()
             covar[:, fltr[:, 0], fltr[:, 1]] *= scln
 
         # Apply per-type bias if available
         if self.per_type_bias is not None:
-            mean[:, edge_center] += self.per_type_bias[center_species]
+            mean += self.per_type_bias[center_species].transpose(0, 1)
 
-        data[self.out_field] = gpytorch.distributions.MultitaskMultivariateNormal(mean, covar)
+        data[self.out_field] = self.distribution(mean, covar)
 
         return data
 
@@ -138,13 +142,14 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
 @compile_mode("script")
 class DSPPHiddenModule(DSPPLayer):
 # class GaussianProcessModule(gpytorch.models.ApproximateGP):
-    def __init__(self, input_dim, output_dim, num_inducing_points, Q=8):
+    def __init__(self, input_dim, output_dim, num_inducing_points, Q):
 
-        if output_dim > 1:
-            inducing_points = torch.randn(num_inducing_points, input_dim)
+        if output_dim <= 1: output_dim = None
+        if output_dim is not None:
+            inducing_points = torch.randn(output_dim, num_inducing_points, input_dim)
             batch_shape = torch.Size([output_dim])
         else:
-            inducing_points = torch.randn(output_dim, num_inducing_points, input_dim)
+            inducing_points = torch.randn(num_inducing_points, input_dim)
             batch_shape = torch.Size([])
 
         # Variational distribution for the inducing points
@@ -166,14 +171,14 @@ class DSPPHiddenModule(DSPPLayer):
         variational_strategy = gpytorch.variational.VariationalStrategy(
             self,
             inducing_points,
-            variational_distribution=variational_distribution,
-            learn_inducing_locations=True
+            variational_distribution,
+            learn_inducing_locations=True,
         )
         super(DSPPHiddenModule, self).__init__(variational_strategy, input_dim, output_dim, Q)
 
         # Mean and covariance modules
-        # self.mean_module = gpytorch.means.LinearMean(input_dim, batch_shape=batch_shape)
-        self.mean_module = gpytorch.means.ConstantMean(batch_shape=batch_shape)
+        self.mean_module = gpytorch.means.LinearMean(input_dim, batch_shape=batch_shape)
+        # self.mean_module = gpytorch.means.ConstantMean(batch_shape=batch_shape)
 
         # self.covar_module = gpytorch.kernels.ScaleKernel(
         #     gpytorch.kernels.RBFKernel(

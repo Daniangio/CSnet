@@ -1,3 +1,4 @@
+import math
 from typing import Dict
 import gpytorch
 import torch.nn
@@ -30,44 +31,67 @@ class GPLoss(SimpleLoss): # Marginal Log Likelihood
         ref: dict,
         key: str,
         mean: bool = True,
+        **kwargs,
     ):
-        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
-
-        if has_nan:
-            not_nan_zeroes = ((ref_key == ref_key).int() * not_zeroes).flatten()
-            loss = -self.obj(pred_key, torch.nan_to_num(ref_key, nan=0.)) * not_nan_zeroes
-            if mean:
-                return loss.sum() / not_nan_zeroes.sum()
-            else:
-                loss = self.likelihood(loss).mean
-                loss[~not_nan_zeroes.bool()] = torch.nan
-                return loss
-        else:
-            not_zeroes = not_zeroes.flatten()
-            loss = -self.obj(pred_key, ref_key) * not_zeroes
-            if mean:
-                return loss.mean(dim=-1).sum() / not_zeroes.sum()
-            else:
-                return self.likelihood(loss).mean
+        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key, **kwargs)
+        not_zeroes = not_zeroes.transpose(0, 1)
+        
+        assert mean
+        loss = -self.obj(pred_key, ref_key.transpose(0, 1))
+        return loss
     
     def prepare(
         self,
         pred: Dict,
         ref:  Dict,
         key:  str,
+        **kwargs,
     ):
         pred_key = pred.get(key)
         ref_key  = ref.get(key)
         has_nan = torch.isnan(ref_key.sum())
-        if has_nan and not (hasattr(self, "ignore_nan") and self.ignore_nan):
-            raise Exception(f"Either the predicted or true property '{key}' has nan values. "
-                             "If this is intended, set 'ignore_nan' to true in config file for this loss.")
+        if has_nan:
+            if not (hasattr(self, "ignore_nan") and self.ignore_nan):
+                raise Exception(f"Either the predicted or true property '{key}' has nan values. "
+                                "If this is intended, set 'ignore_nan' to true in config file for this loss.")
+            fltr = ~torch.isnan(ref_key[:, 0])
+            if fltr.sum() > pred_key.mean.size(-1):
+                # This means that there are 1 or more atoms which have a label but have no neighbours
+                fltr = pred.get(AtomicDataDict.EDGE_INDEX_KEY)[0].unique()
+            ref_key = ref_key[fltr]
+
 
         if hasattr(self, "ignore_zeroes") and self.ignore_zeroes:
             not_zeroes = (~torch.all(ref_key == 0., dim=-1)).int() if len(ref_key.shape) > 1 else (ref_key != 0)
         else:
             not_zeroes = torch.ones(*ref_key.shape[:max(1, len(ref_key.shape)-1)], device=ref_key.device).int()
         not_zeroes = not_zeroes.reshape(*([-1] + [1] * (len(ref_key.shape)-1)))
+
+        if hasattr(self, "rereference") and self.rereference:
+            def rereference(y_pred, y_true, dataset_idcs, node_types, alpha=1.):
+                """
+                Calculate and correct systematic referencing offsets for each atom type and dataset_id in the batch.
+                """
+                unique_node_types = torch.unique(node_types)
+                unique_dataset_ID = torch.unique(dataset_idcs)
+                mean = y_pred.mean
+                for atom in unique_node_types:
+                    for dataset_id in unique_dataset_ID:
+                        mask = ((node_types == atom).flatten() * (dataset_idcs == dataset_id))
+                        if mask.sum() > 0:
+                            mean[:, mask] += alpha * torch.nanmean(y_true[mask].flatten() - mean.mean(dim=0)[mask]).item()
+                
+                return y_pred.__class__(mean, y_pred.lazy_covariance_matrix)
+
+            epoch = kwargs.get('epoch', None)
+            alpha_breakeven_epoch = self.alpha_breakeven_epoch if hasattr(self, "alpha_breakeven_epoch") else 0
+            alpha = math.tanh(epoch - alpha_breakeven_epoch)/2 + 0.5 if epoch is not None else 1.
+            node_centers = ref[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+            # Find the batch index for each node_center
+            batch_indices = torch.searchsorted(pred[f'{key}_slices'], node_centers, right=False) - 1
+            # Apply offsets to targets
+            pred_key = rereference(pred_key, ref_key, pred[AtomicDataDict.DATASET_INDEX_KEY][batch_indices], pred[AtomicDataDict.ATOM_NUMBER_KEY][node_centers], alpha)
+            
         return pred_key, ref_key, has_nan, not_zeroes
 
 
@@ -88,8 +112,9 @@ class GPMAELoss(GPLoss):
         ref: dict,
         key: str,
         mean: bool = True,
+        **kwargs,
     ):
-        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
+        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key, **kwargs)
 
         if has_nan:
             not_nan_zeroes = (ref_key == ref_key).int() * not_zeroes
@@ -144,24 +169,16 @@ class GPdpllMAELoss(GPdpllLoss):
         ref: dict,
         key: str,
         mean: bool = True,
+        **kwargs,
     ):
-        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
+        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key, **kwargs)
+        not_zeroes = not_zeroes.transpose(0, 1)
 
-        if has_nan:
-            not_nan_zeroes = (ref_key == ref_key).int() * not_zeroes
-            loss = self.func(pred_key.mean[0], torch.nan_to_num(ref_key, nan=0.)) * not_nan_zeroes
-            if mean:
-                return loss.sum() / not_nan_zeroes.sum()
-            else:
-                loss = self.likelihood(loss).mean
-                loss[~not_nan_zeroes.bool()] = torch.nan
-                return loss
-        else:
-            loss = self.func(pred_key.mean[0], ref_key) * not_zeroes
-            if mean:
-                return loss.mean(dim=-1).sum() / not_zeroes.sum()
-            else:
-                return self.likelihood(loss).mean
+        loss = self.func(pred_key.mean, ref_key.transpose(0, 1)) * not_zeroes
+        loss = loss.mean(dim=-2)
+        if mean:
+            return loss.sum() / not_zeroes.sum()
+        return loss
 
 
 class NoiseLoss(SimpleLoss):
@@ -181,6 +198,7 @@ class NoiseLoss(SimpleLoss):
         pred: Dict,
         ref:  Dict,
         key:  str,
+        **kwargs,
     ):
         assert AtomicDataDict.NOISE in ref, "Noise is missing from dataset. Please add 'noise: [float]' to your config file to use this loss."
         ref_key = -1 * ref.get(AtomicDataDict.NOISE)
