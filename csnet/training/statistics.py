@@ -1,5 +1,6 @@
 import os
 import glob
+from typing import List, Optional
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -57,30 +58,35 @@ def get_npz_statistics(
             else:
                 df = pd.concat([df, update_df], ignore_index=True)
             df_dict[index] = df
+            anames = atom_names[fltr][nan_fltr]
+            rnames = resnames[fltr][nan_fltr]
+            if len(anames) > 0:
+                df_dict[f"{rnames[0]}.{anames[0]}"] = index
     print("Completed!")
     return df_dict
 
-def plot_distribution(statistics: dict, resname: str, atomname: str, src: str = 'true', index=None, method='full'):
-    try:
-        if index is None:
-            index = DataDict.get_atom_type(resname, atomname, method=method)
-        data = statistics[index]
-        if len(data) == 0:
-            return
-        fig = px.histogram(
-            data[data['resname'] == resname],
-            x='value',
-            color='filename',
-            marginal="rug", # can be `box`, `violin`
-            hover_data=data.columns,
-            nbins=100,
-            title=f"{resname}-{atomname}",
-            
-        )
-        fig.show()
-        fig.write_html(f"../media/{resname}-{atomname}-{src}.html")
-    except:
-        pass
+def plot_distribution(statistics: dict, resnames: List[str], atomnames: Optional[List[str]] = None, node_types=None, src: str = 'true', method='full'):
+    for resname in resnames:
+        for atomname in atomnames:
+            try:
+                node_type = statistics.get(f"{resname}.{atomname}")
+                data = statistics[node_type]
+                if len(data) == 0:
+                    return
+                fig = px.histogram(
+                    data[data['resname'] == resname],
+                    x='value',
+                    color='filename',
+                    marginal="rug", # can be `box`, `violin`
+                    hover_data=data.columns,
+                    nbins=100,
+                    title=f"{resname}-{atomname}",
+                    
+                )
+                fig.show()
+                fig.write_html(f"../media/{resname}-{atomname}-{src}.html")
+            except:
+                pass
 
 def build_config_params(statistics: dict, config_root: str, confname: str, type_names=None, method='full'):
     txt = 'type_names:\n'
@@ -90,7 +96,7 @@ def build_config_params(statistics: dict, config_root: str, confname: str, type_
         txt += f'  - {type_name}\n'
 
     feat_stats = []
-    for index in range(len(DataDict.CHEMICAL_SPECIES2ATOM_TYPE_LIST(method))):
+    for index in range(len(type_names)):
         try:
             avg = statistics[index].value.mean()
             std = statistics[index].value.std()
@@ -102,11 +108,11 @@ def build_config_params(statistics: dict, config_root: str, confname: str, type_
 
     txt += '\n\nper_type_bias:\n'
     for avg, type_name in zip(feat_stats[:, 0], type_names):
-        txt += f"  - {avg: <20} # {type_name}\n"
+        txt += f"  - {avg: <12.4f} # {type_name}\n"
     
     txt += '\n\nper_type_std:\n'
     for std, type_name in zip(feat_stats[:, 1], type_names):
-        txt += f"  - {std: <20} # {type_name}\n"
+        txt += f"  - {std: <12.4f} # {type_name}\n"
      
     with open(os.path.join(config_root, confname), 'w') as f:
         f.write(txt)
