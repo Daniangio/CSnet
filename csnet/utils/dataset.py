@@ -153,8 +153,13 @@ class AtomTypeAssigner:
                 atom_types_list.append(atom_type_map[key])
                 atom_types[format_name] = atom_types_list
         return atom_types
-
-
+    
+    def read_atom_types(self, atom, format_name, key_format, atom_type):
+        key = self.generate_key(atom, key_format)
+        atom_type_map = self.atom_type_map.get(format_name, OrderedDict())
+        if key not in atom_type_map:
+            atom_type_map[key] = atom_type
+        self.atom_type_map[format_name] = atom_type_map
 
 class NMRDatasetBuilder:
     def __init__(self, config_file):
@@ -173,7 +178,7 @@ class NMRDatasetBuilder:
     def dataset_info(self):
         if self.__dataset_info is None or len(self._dataset_info) != self._last_dataset_info_len:
             if len(self._dataset_info) == 0: return None
-            logging.info('Building dataset info file...')
+            logging.info('- Building dataset info file...')
             self._last_dataset_info_len = len(self._dataset_info)
             __dataset_info = pd.concat(self._dataset_info, ignore_index=True)
             self.__dataset_info = __dataset_info.groupby(self.match_columns, dropna=False).first().reset_index()
@@ -196,6 +201,16 @@ class NMRDatasetBuilder:
     
     def format_npz(self, pdbcode, bmrbid):
         return f'{self.stem(pdbcode)}.{self.stem(bmrbid)}.npz'
+    
+    def dataset_info_filename(self, data_root):
+        return os.path.join(data_root, 'dataset_info.csv')
+    
+    def save_dataset_info(self, data_root):
+        self.dataset_info.to_csv(self.dataset_info_filename(data_root))
+        logging.info(f'Dataset info file saved at {self.dataset_info_filename(data_root)}')
+    
+    def node_type_stats(self, data_root):
+        return os.path.join(data_root, 'node_type_statistics.yaml')
     
     def build(self, nmr2pdb: Union[List, str], max_structures = None, data_root: str = './'):
         if isinstance(nmr2pdb, str):
@@ -235,16 +250,46 @@ class NMRDatasetBuilder:
             np.savez(self.npz_filename(data_root, pdbcode, bmrbid), **pdb)
             logging.info(f'File {self.npz_filename(data_root, pdbcode, bmrbid)} saved!')
         
-        dataset_info_filename = os.path.join(data_root, 'dataset_info.csv')
-        self.dataset_info.to_csv(dataset_info_filename)
-        logging.info(f'Dataset info file saved at {dataset_info_filename}')
+        self.save_dataset_info(data_root)
     
     def update_dataset_info(self, pdb: dict, pdbcode, bmrbid):
         data = []
-        for fullname, cs in zip(
-            pdb.get('aligned_atom_fullnames') , pdb.get('chemical_shifts')[0],
+
+        for items in zip(
+            pdb.get('aligned_atom_fullnames'),
+            pdb.get('atom_numbers'),
+            pdb.get('chemical_shifts')[0],
+            *[pdb.get(format_name) for format_name in self.atom_type_assigner.key_formats]
         ):
-            chainID, resnum, resname, atomname = fullname.split('.')
+            vars = {
+                'fullname'  : items[0],
+                'atomnumber': items[1],
+                'cs'        : items[2],
+                **{
+                    (format_name, key_format): _type
+                    for (format_name, key_format), _type
+                    in zip(self.atom_type_assigner.key_formats.items(), items[3:])
+                }
+            }
+            
+            chainID, resnum, resname, atomname = vars.get('fullname').split('.')
+            element = {v: k for k, v in atomic_number_map.items()}[vars.get('atomnumber')]
+            atom_data = {
+                "chainID"  : chainID,
+                "resnumber": resnum,
+                "resname"  : resname,
+                "atomname" : atomname,
+                "element"  : element,
+            }
+
+            for format_name_key_format_tuple, atom_type in vars.items():
+                if not isinstance(format_name_key_format_tuple, tuple) : continue
+                format_name, key_format = format_name_key_format_tuple
+                self.atom_type_assigner.read_atom_types(atom_data, format_name, key_format, atom_type)
+            
+            if np.isnan(vars.get('cs')):
+                continue
+            
             def cast_to_item(x):
                 return x.item() if isinstance(x, np.ndarray) else x
             record = {k: cast_to_item(v) for k,v in {
@@ -257,7 +302,7 @@ class NMRDatasetBuilder:
                 'CHAINID'     : str(chainID),
                 'RESNUM'      : resnum,
                 'RESNAME'     : resname,
-                atomname      : cs,
+                atomname      : vars.get('cs'),
             }.items()}
 
             data.append(record)
@@ -642,9 +687,9 @@ class NMRDatasetBuilder:
         if self.dataset_info is None:
             self.build_dataset_info_from_npz(data_root)
         
+        df = self.dataset_info
         logging.info(f'- Filtering npz datasets -')
         os.makedirs(self.npz_excluded_datadir(data_root), exist_ok=True)
-        df = self.dataset_info
         for pdbcode in df["PDB_FILENAME"].unique():
             for bmrbid in df[df["PDB_FILENAME"] == pdbcode]["NMR_FILENAME"].unique():
                 exclude = False
@@ -679,24 +724,36 @@ class NMRDatasetBuilder:
     def build_statistics(self, data_root: str = './', rebuild=False):
         logging.info(f'--- BUILDING STATISTICS ---')
         if rebuild or self.dataset_info is None:
-            self.build_dataset_info_from_npz(data_root)
+            self.build_dataset_info_from_npz(data_root, save=not rebuild)
 
         df = self.dataset_info
         statistics = {}
-        for resname in df.RESNAME.unique():
-            for atomname in [col for col in df.columns if col not in self.match_columns]:
-                data = df[df['RESNAME']==resname][atomname]
-                if data.mean() is not np.nan:
-                    statistics[resname, atomname] = df[df['RESNAME']==resname][self.match_columns + [atomname]]
+        keep_cols = []
+        for col in [col for col in df.columns if col not in self.match_columns]:
+            if df[col].mean() is not np.nan:
+                keep_cols.append(col)
+        grouped = df.groupby(['RESNAME'])[keep_cols]
+        grouped_means = grouped.mean()
+        resname_atomname_pairs = [
+            (index, col) for index, row in grouped_means.iterrows()
+            for col, value in row.items() if not np.isnan(value)
+        ]
+
+        for resname_atomname in resname_atomname_pairs:
+            resname, atomname = resname_atomname
+            statistics[resname_atomname] = df.loc[grouped.groups[resname]][self.match_columns + [atomname]]
+        
         self.statistics = statistics
 
-    def build_dataset_info_from_npz(self, data_root):
+    def build_dataset_info_from_npz(self, data_root, save=True):
         logging.info(f'- Loading data from npz -')
         self._dataset_info = []
         for filename in os.listdir(self.npz_datadir(data_root)):
             pdbcode, bmrbid = Path(filename).stem.split('.')
             pdb = dict(np.load(self.npz_filename(data_root, pdbcode, bmrbid)))
             self.update_dataset_info(pdb, pdbcode, bmrbid)
+        if save:
+            self.save_dataset_info(data_root)
     
     def extract_outliers(self):
         logging.info(f'--- EXTRACTING OUTLIERS ---')
@@ -766,5 +823,5 @@ class NMRDatasetBuilder:
             
         txt = f'{type_names_txt}\n\n{per_type_bias_txt}\n\n{per_type_std_txt}'
         
-        with open(os.path.join(data_root, 'node_type_statistics.yaml'), 'w') as f:
+        with open(self.node_type_stats(data_root), 'w') as f:
             f.write(txt)
