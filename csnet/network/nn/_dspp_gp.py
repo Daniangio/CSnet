@@ -57,20 +57,23 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
             out_irreps = out_irreps if isinstance(out_irreps, Irreps) else Irreps(out_irreps)
 
         # This module will scale the NN features so that they're nice values
-        # scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(*grid_range)
-        
+        scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(*grid_range)
+
+        self.distribution = MultitaskMultivariateNormal if out_irreps.dim > 1 else MultivariateNormal
         head = DSPPHiddenModule(
             input_dim=in_irreps.dim,
             output_dim=out_irreps.dim,
+            mean_type='linear',
             num_inducing_points=num_inducing_points,
             Q=num_quadrature_sites, # Number of quadrature sites (see paper for a description of this. 5-10 generally works well).
+            out_distribution=self.distribution,
         )
 
         super().__init__(num_quadrature_sites)
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
         self.field = field
         self.out_field = out_field
-        # self.scale_to_bounds = scale_to_bounds
+        self.scale_to_bounds = scale_to_bounds
         self.head = head
 
         self._init_irreps(
@@ -99,9 +102,6 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
             self.per_type_std = torch.nn.Parameter(per_type_std.reshape(num_types, -1))
         else:
             self.per_type_std = None
-        
-        self.distribution = MultitaskMultivariateNormal if out_irreps.dim > 1 else MultivariateNormal
-
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         features = data[self.field]
@@ -111,26 +111,30 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
         
         # features = self.scale_to_bounds(features)
         features = self.head(features)
-        mean, covar = features.mean, features.covariance_matrix
+        mean, covar = features.mean.clone(), features.covariance_matrix.clone()
 
-        # Scaling
-        center_species = data[AtomicDataDict.NODE_TYPE_KEY][edge_center].squeeze(dim=-1)
+        if self.per_type_std is not None or self.per_type_bias is not None:
 
-        # Apply per-type std scaling if available
-        if self.per_type_std is not None:
-            scaling = self.per_type_std[center_species].transpose(0, 1)
-            mean = mean * scaling
+            # Scaling
+            center_species = data[AtomicDataDict.NODE_TYPE_KEY][edge_center].squeeze(dim=-1)
 
-            fltr = torch.combinations(torch.arange(covar.size(-1), device=covar.device), r=2)
-            scln = torch.combinations(scaling.flatten(), r=2).prod(dim=1, keepdim=True).transpose(0, 1)
-            covar=covar.clone()
-            covar[:, fltr[:, 0], fltr[:, 1]] *= scln
+            # Apply per-type std scaling if available
+            if self.per_type_std is not None:
+                scaling = self.per_type_std[center_species].transpose(0, 1).abs()
+                mean = mean * scaling
 
-        # Apply per-type bias if available
-        if self.per_type_bias is not None:
-            mean += self.per_type_bias[center_species].transpose(0, 1)
+                scaling_diag = torch.diag_embed(scaling.flatten())
+                covar = scaling_diag @ covar @ scaling_diag
 
-        data[self.out_field] = self.distribution(mean, covar)
+            # Apply per-type bias if available
+            if self.per_type_bias is not None:
+                mean += self.per_type_bias[center_species].transpose(0, 1)
+        
+        try:
+            features = self.distribution(mean, covar)
+        except:
+            features = features * torch.nan
+        data[self.out_field] = features
 
         return data
 
@@ -141,8 +145,7 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
 
 @compile_mode("script")
 class DSPPHiddenModule(DSPPLayer):
-# class GaussianProcessModule(gpytorch.models.ApproximateGP):
-    def __init__(self, input_dim, output_dim, num_inducing_points, Q):
+    def __init__(self, input_dim, output_dim, mean_type, num_inducing_points, Q, out_distribution, distribution='Cholesky'):
 
         if output_dim <= 1: output_dim = None
         if output_dim is not None:
@@ -153,16 +156,24 @@ class DSPPHiddenModule(DSPPLayer):
             batch_shape = torch.Size([])
 
         # Variational distribution for the inducing points
-        # --- Option 1 ---
+        """
+        - CholeskyVariationalDistribution:
+            When you have a small number of inducing points.
+            When you believe there are complex dependencies between the inducing points.
+            When you're willing to sacrifice computational efficiency for increased model flexibility.
+        
+        - MeanFieldVariationalDistribution:
+            When you have a large number of inducing points.
+            When you believe the inducing points are relatively independent.
+            When you prioritize computational efficiency over model flexibility.
+        """
 
-        # # variational_distribution = gpytorch.variational.CholeskyVariationalDistribution(
-        # #     num_inducing_points=num_inducing_points,
-        # #     batch_shape=batch_shape,
-        # # )
-
-        # --- Option 2 ---
-
-        variational_distribution = gpytorch.variational.MeanFieldVariationalDistribution(
+        assert distribution in ['Cholesky', 'MeanField']
+        if distribution == 'Cholesky':
+            distribution = gpytorch.variational.CholeskyVariationalDistribution
+        elif distribution == 'MeanField':
+            distribution = gpytorch.variational.MeanFieldVariationalDistribution
+        variational_distribution = distribution(
             num_inducing_points=num_inducing_points,
             batch_shape=batch_shape,
         )
@@ -177,16 +188,11 @@ class DSPPHiddenModule(DSPPLayer):
         super(DSPPHiddenModule, self).__init__(variational_strategy, input_dim, output_dim, Q)
 
         # Mean and covariance modules
-        self.mean_module = gpytorch.means.LinearMean(input_dim, batch_shape=batch_shape)
-        # self.mean_module = gpytorch.means.ConstantMean(batch_shape=batch_shape)
-
-        # self.covar_module = gpytorch.kernels.ScaleKernel(
-        #     gpytorch.kernels.RBFKernel(
-        #         batch_shape=batch_shape,
-        #         ard_num_dims=input_dim,
-        #     ),
-        #     batch_shape=batch_shape, ard_num_dims=None
-        # )
+        assert mean_type in ['constant', 'linear']
+        if mean_type == 'constant':
+            self.mean_module = gpytorch.means.ConstantMean(batch_shape=batch_shape)
+        elif mean_type == 'linear':
+            self.mean_module = gpytorch.means.LinearMean(input_dim, batch_shape=batch_shape)
 
         self.covar_module = gpytorch.kernels.ScaleKernel(
             gpytorch.kernels.MaternKernel(
@@ -196,18 +202,12 @@ class DSPPHiddenModule(DSPPLayer):
             batch_shape=batch_shape,
             ard_num_dims=None,
         )
-        
-        # self.covar_module = gpytorch.kernels.AdditiveStructureKernel(
-        #     gpytorch.kernels.RBFKernel(
-        #         batch_shape=batch_shape,
-        #         ard_num_dims=input_dim,
-        #     ),
-        #     num_dims=input_dim,
-        # )
 
-        add_tags_to_parameters(self, 'strengthen')
+        self.distribution = out_distribution
+
+        # add_tags_to_parameters(self, 'strengthen')
 
     def forward(self, x):
         mean = self.mean_module(x)
         covar = self.covar_module(x)
-        return gpytorch.distributions.MultivariateNormal(mean, covar)
+        return self.distribution(mean, covar)
