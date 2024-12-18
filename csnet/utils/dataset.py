@@ -107,6 +107,22 @@ class AtomTypeAssigner:
         self.next_atom_type_dict = {}
         self.group_map = self._prepare_groups()
     
+    def filename(self, data_root):
+        return os.path.join(data_root, 'atom_type_assigner.yaml')
+    
+    def save_atom_type_map(self, data_root):
+        with open(self.filename(data_root), 'w') as f:
+            yaml.safe_dump(self.atom_type_map, f)
+
+    def load_atom_type_map(self, data_root):
+        try:
+            if os.path.isfile(self.filename(data_root)):
+                self.atom_type_map = dict(yaml.safe_load(self.filename(data_root)))
+                return True
+        except:
+            logging.warning(f"Failed loading file {self.filename(data_root)}")
+        return False
+    
     def _prepare_groups(self):
         """
         Prepares a mapping from key to group index to ensure all keys in a group
@@ -144,7 +160,7 @@ class AtomTypeAssigner:
         for atom in atoms:
             for format_name, key_format in self.key_formats.items():
                 key = self.generate_key(atom, key_format)
-                atom_type_map = self.atom_type_map.get(format_name, OrderedDict())
+                atom_type_map = self.atom_type_map.get(format_name, dict())
                 if key not in atom_type_map:
                     atom_type_map[key] = self.next_atom_type_dict.get(format_name, 0)
                     self.next_atom_type_dict[format_name] = self.next_atom_type_dict.get(format_name, 0) + 1
@@ -156,7 +172,7 @@ class AtomTypeAssigner:
     
     def read_atom_types(self, atom, format_name, key_format, atom_type):
         key = self.generate_key(atom, key_format)
-        atom_type_map = self.atom_type_map.get(format_name, OrderedDict())
+        atom_type_map = self.atom_type_map.get(format_name, dict())
         if key not in atom_type_map:
             atom_type_map[key] = atom_type
         self.atom_type_map[format_name] = atom_type_map
@@ -250,9 +266,10 @@ class NMRDatasetBuilder:
             np.savez(self.npz_filename(data_root, pdbcode, bmrbid), **pdb)
             logging.info(f'File {self.npz_filename(data_root, pdbcode, bmrbid)} saved!')
         
+        self.atom_type_assigner.save_atom_type_map(data_root)
         self.save_dataset_info(data_root)
     
-    def update_dataset_info(self, pdb: dict, pdbcode, bmrbid):
+    def update_dataset_info(self, pdb: dict, pdbcode, bmrbid, atom_type_assigner_is_missing=False):
         data = []
 
         for items in zip(
@@ -274,18 +291,20 @@ class NMRDatasetBuilder:
             
             chainID, resnum, resname, atomname = vars.get('fullname').split('.')
             element = {v: k for k, v in atomic_number_map.items()}[vars.get('atomnumber')]
-            atom_data = {
-                "chainID"  : chainID,
-                "resnumber": resnum,
-                "resname"  : resname,
-                "atomname" : atomname,
-                "element"  : element,
-            }
+            
+            if atom_type_assigner_is_missing:
+                atom_data = {
+                    "chainID"  : chainID,
+                    "resnumber": resnum,
+                    "resname"  : resname,
+                    "atomname" : atomname,
+                    "element"  : element,
+                }
 
-            for format_name_key_format_tuple, atom_type in vars.items():
-                if not isinstance(format_name_key_format_tuple, tuple) : continue
-                format_name, key_format = format_name_key_format_tuple
-                self.atom_type_assigner.read_atom_types(atom_data, format_name, key_format, atom_type)
+                for format_name_key_format_tuple, atom_type in vars.items():
+                    if not isinstance(format_name_key_format_tuple, tuple) : continue
+                    format_name, key_format = format_name_key_format_tuple
+                    self.atom_type_assigner.read_atom_types(atom_data, format_name, key_format, atom_type)
             
             if np.isnan(vars.get('cs')):
                 continue
@@ -746,12 +765,13 @@ class NMRDatasetBuilder:
         self.statistics = statistics
 
     def build_dataset_info_from_npz(self, data_root, save=True):
+        atom_type_assigner_is_missing = not self.atom_type_assigner.load_atom_type_map(data_root)
         logging.info(f'- Loading data from npz -')
         self._dataset_info = []
         for filename in os.listdir(self.npz_datadir(data_root)):
             pdbcode, bmrbid = Path(filename).stem.split('.')
             pdb = dict(np.load(self.npz_filename(data_root, pdbcode, bmrbid)))
-            self.update_dataset_info(pdb, pdbcode, bmrbid)
+            self.update_dataset_info(pdb, pdbcode, bmrbid, atom_type_assigner_is_missing)
         if save:
             self.save_dataset_info(data_root)
     
@@ -810,16 +830,16 @@ class NMRDatasetBuilder:
         for format_name, atom_type_map in self.atom_type_assigner.atom_type_map.items():
             if format_name != 'atom_types':
                 continue
-            for type_name in atom_type_map:
+            for type_name, atom_type in sorted(atom_type_map.items(), key=lambda x: x[1]):
                 resname, atomname = type_name.split('.')
-                type_names_txt    += f'  - {type_name}\n'
+                type_names_txt    += f'  - {type_name:12}# | {atom_type}\n'
                 stats = self.statistics.get(tuple([resname, atomname]), None)
                 if stats is not None:
-                    per_type_bias_txt += f'  - {np.nan_to_num(stats[atomname].mean(), 0.):8.4f} # {type_name}\n'
-                    per_type_std_txt  += f'  - {np.nan_to_num(stats[atomname].std(),  1.):8.4f} # {type_name}\n'
+                    per_type_bias_txt += f'  - {np.nan_to_num(stats[atomname].mean(), 0.):8.4f}    # {type_name:12}| {atom_type}\n'
+                    per_type_std_txt  += f'  - {np.nan_to_num(stats[atomname].std(),  1.):8.4f}    # {type_name:12}| {atom_type}\n'
                 else:
-                    per_type_bias_txt += f'  - {0.:8.4f} # {type_name}\n'
-                    per_type_std_txt  += f'  - {1.:8.4f} # {type_name}\n'
+                    per_type_bias_txt += f'  - {0.:8.4f}    # {type_name:12}| {atom_type}\n'
+                    per_type_std_txt  += f'  - {1.:8.4f}    # {type_name:12}| {atom_type}\n'
             
         txt = f'{type_names_txt}\n\n{per_type_bias_txt}\n\n{per_type_std_txt}'
         
