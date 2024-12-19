@@ -33,7 +33,7 @@ atomic_number_map = {
     "Tb": 65, "Dy": 66, "Ho": 67, "Er": 68, "Tm": 69, "Yb": 70, "Lu": 71,
     "Hf": 72, "Ta": 73, "W": 74,  "Re": 75, "Os": 76, "Ir": 77, "Pt": 78,
     "Au": 79, "Hg": 80, "Tl": 81, "Pb": 82, "Bi": 83, "Po": 84, "At": 85,
-    "Rn": 86, "Fr": 87, "Ra": 88, "Ac": 89, "Th": 90, "Pa": 91, "U": 92
+    "Rn": 86, "Fr": 87, "Ra": 88, "Ac": 89, "Th": 90, "Pa": 91, "U": 92,
 }
 
 def search_keys(data, search_terms):
@@ -94,41 +94,44 @@ def get_pdb_experimental_details(pdb_code):
 
 
 class AtomTypeAssigner:
-    def __init__(self, config_file):
+    def __init__(self, config, atom_type_map=None):
         # Load configuration from YAML
-        with open(config_file, 'r') as file:
+        with open(config, 'r') as file:
             self.config = yaml.safe_load(file)
         
-        self.key_formats = self.config.get("key_formats", {"atom_types": "{resname}.{atomname}"})
-        self.groups = self.config.get("groups", [])
-        self.accepted_resnames = self.config.get("accepted_resnames", [])
-        self.remap_resname = self.config.get("remap_resname", "MOL")
-        self.atom_type_map = {}
-        self.next_atom_type_dict = {}
-        self.group_map = self._prepare_groups()
+        self.key_formats      : dict = self.config.get("key_formats", {"atom_types": "{resname}.{atomname}"})
+        self.groups           : list = self.config.get("groups", [])
+        self.accepted_resnames: list = self.config.get("accepted_resnames", [])
+        self.remap_resname    : str  = self.config.get("remap_resname", "MOL")
+        self.atom_type_map           = dict()
+        self.next_atom_type_dict     = dict()
+        self.group_map        : dict = self._prepare_groups()
+
+        self.atom_type_map_is_fixed = self.load_atom_type_map(atom_type_map)
     
     def filename(self, data_root):
-        return os.path.join(data_root, 'atom_type_assigner.yaml')
+        return os.path.join(data_root, 'atom_type_map.yaml')
     
     def save_atom_type_map(self, data_root):
         with open(self.filename(data_root), 'w') as f:
             yaml.safe_dump(self.atom_type_map, f)
 
-    def load_atom_type_map(self, data_root):
+    def load_atom_type_map(self, atom_type_map):
         try:
-            if os.path.isfile(self.filename(data_root)):
-                self.atom_type_map = dict(yaml.safe_load(self.filename(data_root)))
+            if atom_type_map and os.path.isfile(atom_type_map):
+                with open(atom_type_map, 'r') as f:
+                    self.atom_type_map = dict(yaml.safe_load(f))
                 return True
         except:
-            logging.warning(f"Failed loading file {self.filename(data_root)}")
+            logging.warning(f"Failed loading file {atom_type_map}")
         return False
     
-    def _prepare_groups(self):
+    def _prepare_groups(self) -> dict:
         """
         Prepares a mapping from key to group index to ensure all keys in a group
         get the same atom type.
         """
-        group_map = {}
+        group_map = dict()
         for group in self.groups:
             for key in group:
                 group_map[key] = group[0]  # Assign group leader
@@ -162,10 +165,11 @@ class AtomTypeAssigner:
                 key = self.generate_key(atom, key_format)
                 atom_type_map = self.atom_type_map.get(format_name, dict())
                 if key not in atom_type_map:
+                    assert not self.atom_type_map_is_fixed, f"Using a loaded atom_type_map, but found a new atom_type: {key}"
                     atom_type_map[key] = self.next_atom_type_dict.get(format_name, 0)
                     self.next_atom_type_dict[format_name] = self.next_atom_type_dict.get(format_name, 0) + 1
                     self.atom_type_map[format_name] = atom_type_map
-                atom_types_list = atom_types.get(format_name, [])
+                atom_types_list: list = atom_types.get(format_name, [])
                 atom_types_list.append(atom_type_map[key])
                 atom_types[format_name] = atom_types_list
         return atom_types
@@ -178,8 +182,8 @@ class AtomTypeAssigner:
         self.atom_type_map[format_name] = atom_type_map
 
 class NMRDatasetBuilder:
-    def __init__(self, config_file):
-        self.atom_type_assigner = AtomTypeAssigner(config_file)
+    def __init__(self, config, atom_type_map=None):
+        self.atom_type_assigner = AtomTypeAssigner(config, atom_type_map)
         self.match_columns = ['PDB_FILENAME', 'PDB_PH', 'PDB_TEMP', 'NMR_FILENAME', 'NMR_PH', 'NMR_TEMP', 'CHAINID', 'RESNUM', 'RESNAME']
         self._dataset_info = []
         self._last_dataset_info_len = 0
@@ -228,7 +232,7 @@ class NMRDatasetBuilder:
     def node_type_stats(self, data_root):
         return os.path.join(data_root, 'node_type_statistics.yaml')
     
-    def build(self, nmr2pdb: Union[List, str], max_structures = None, data_root: str = './'):
+    def build(self, nmr2pdb: Union[List, str], max_structures = None, data_root: str = './', atom_type_map_data_root=None):
         if isinstance(nmr2pdb, str):
             df = pd.read_csv(nmr2pdb)
             df = df.rename(columns=lambda x: x.strip())
@@ -700,8 +704,8 @@ class NMRDatasetBuilder:
         data_root: str = './',
         ph_range   = [5., 9.],
         ph_max_diff = 1.,
-        temp_range = [290, 350],
-        temp_max_diff = 10.,
+        temp_range = [270, 350],
+        temp_max_diff = 20.,
     ):
         if self.dataset_info is None:
             self.build_dataset_info_from_npz(data_root)

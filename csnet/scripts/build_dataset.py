@@ -32,11 +32,17 @@ def main():
                         default='./', 
                         help='Output folder path (default: "./")')
     
+    parser.add_argument('-a',
+                        '--atom-type-map', 
+                        type=str, 
+                        default=None, 
+                        help='Folder path where to find atom_type_assigner.yaml (default: None == use data_root)')
+    
     # Parse arguments
     args = parser.parse_args()
 
     # Initialize the NMRDataset with the config file
-    dataset_builder = NMRDatasetBuilder(args.config)
+    dataset_builder = NMRDatasetBuilder(args.config, args.atom_type_map)
 
     # Build the dataset
     dataset_builder.build(args.nmr2pdb, max_structures=args.max_structures, data_root=args.data_root)
