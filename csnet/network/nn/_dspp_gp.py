@@ -38,7 +38,7 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
         out_irreps: Optional[Union[Irreps, str]] = None,
         grid_range: Optional[List[float]] = None,
         num_inducing_points: Optional[int] = None,
-        num_quadrature_sites = 8,
+        num_quadrature_sites = 1,
         # Scaling
         per_type_bias: Optional[List] = None,
         per_type_std: Optional[List] = None,
