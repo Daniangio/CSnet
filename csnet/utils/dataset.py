@@ -9,32 +9,18 @@ import numpy as np
 import MDAnalysis as mda
 import pandas as pd
 
-from typing import List, Union
+from typing import List, Optional, Union
 from collections import OrderedDict
 from pathlib import Path
 
 from pdbfixer import PDBFixer
 from openmm.app import PDBFile, ForceField
+from sklearn.ensemble import IsolationForest
+from geqtrain.utils import ATOMIC_NUMBER_MAP
 
 import warnings
 warnings.filterwarnings('ignore')
 
-
-atomic_number_map = {
-    "H": 1,  "He": 2,  "Li": 3,  "Be": 4,  "B": 5,  "C": 6,  "N": 7,  "O": 8, 
-    "F": 9,  "Ne": 10, "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, 
-    "S": 16, "Cl": 17, "Ar": 18, "K": 19,  "Ca": 20, "Sc": 21, "Ti": 22, 
-    "V": 23, "Cr": 24, "Mn": 25, "Fe": 26, "Co": 27, "Ni": 28, "Cu": 29, 
-    "Zn": 30, "Ga": 31, "Ge": 32, "As": 33, "Se": 34, "Br": 35, "Kr": 36,
-    "Rb": 37, "Sr": 38, "Y": 39,  "Zr": 40, "Nb": 41, "Mo": 42, "Tc": 43,
-    "Ru": 44, "Rh": 45, "Pd": 46, "Ag": 47, "Cd": 48, "In": 49, "Sn": 50,
-    "Sb": 51, "Te": 52, "I": 53,  "Xe": 54, "Cs": 55, "Ba": 56, "La": 57,
-    "Ce": 58, "Pr": 59, "Nd": 60, "Pm": 61, "Sm": 62, "Eu": 63, "Gd": 64,
-    "Tb": 65, "Dy": 66, "Ho": 67, "Er": 68, "Tm": 69, "Yb": 70, "Lu": 71,
-    "Hf": 72, "Ta": 73, "W": 74,  "Re": 75, "Os": 76, "Ir": 77, "Pt": 78,
-    "Au": 79, "Hg": 80, "Tl": 81, "Pb": 82, "Bi": 83, "Po": 84, "At": 85,
-    "Rn": 86, "Fr": 87, "Ra": 88, "Ac": 89, "Th": 90, "Pa": 91, "U": 92,
-}
 
 def search_keys(data, search_terms):
     """
@@ -210,7 +196,7 @@ class NMRDatasetBuilder:
     def npz_excluded_datadir(self, data_root):
         return os.path.join(data_root, 'npz_excluded')
     
-    def npz_filename(self, data_root, pdbcode, bmrbid):
+    def npz_filename(self, data_root, pdbcode, bmrbid=None):
         return os.path.join(self.npz_datadir(data_root), self.format_npz(pdbcode, bmrbid))
     
     def npz_excluded_filename(self, data_root, pdbcode, bmrbid):
@@ -219,7 +205,9 @@ class NMRDatasetBuilder:
     def stem(self, filename):
         return Path(str(filename)).stem
     
-    def format_npz(self, pdbcode, bmrbid):
+    def format_npz(self, pdbcode, bmrbid=None):
+        if bmrbid is None:
+            return f'{self.stem(pdbcode)}.npz'
         return f'{self.stem(pdbcode)}.{self.stem(bmrbid)}.npz'
     
     def dataset_info_filename(self, data_root):
@@ -232,7 +220,7 @@ class NMRDatasetBuilder:
     def node_type_stats(self, data_root):
         return os.path.join(data_root, 'node_type_statistics.yaml')
     
-    def build(self, nmr2pdb: Union[List, str], max_structures = None, data_root: str = './', atom_type_map_data_root=None):
+    def build(self, nmr2pdb: Union[List, str], slicing=None, data_root: str = './'):
         if isinstance(nmr2pdb, str):
             df = pd.read_csv(nmr2pdb)
             df = df.rename(columns=lambda x: x.strip())
@@ -253,7 +241,7 @@ class NMRDatasetBuilder:
             except Exception as e:
                 logging.warning(e)
                 continue
-            pdb = self.getpdb(pdbcode, datadir=os.path.join(data_root, 'rcsb.pdb'), max_structures=max_structures)
+            pdb = self.getpdb(pdbcode, datadir=os.path.join(data_root, 'rcsb.pdb'), slicing=slicing)
             if pdb is None:
                 continue
 
@@ -272,6 +260,17 @@ class NMRDatasetBuilder:
         
         self.atom_type_assigner.save_atom_type_map(data_root)
         self.save_dataset_info(data_root)
+    
+    def build_inference(self, topology: str, traj: Optional[List[str]]=None, slicing=None, ph=7.0, temperature=298., data_root: str = './'):
+        os.makedirs(data_root, exist_ok=True)
+        os.makedirs(self.npz_datadir(data_root), exist_ok=True)
+        logging.info(f'--- BUILDING DATASET ---')
+        
+        pdb = self.parseinput(topology, traj=traj, slicing=slicing, ph=ph, temperature=temperature)
+        p = Path(topology)
+        np.savez(self.npz_filename(data_root, p.stem), **pdb)
+        logging.info(f'File {self.npz_filename(data_root, p.stem)} saved!')
+        return pdb
     
     def update_dataset_info(self, pdb: dict, pdbcode, bmrbid, atom_type_assigner_is_missing=False):
         data = []
@@ -294,7 +293,7 @@ class NMRDatasetBuilder:
             }
             
             chainID, resnum, resname, atomname = vars.get('fullname').split('.')
-            element = {v: k for k, v in atomic_number_map.items()}[vars.get('atomnumber')]
+            element = {v: k for k, v in ATOMIC_NUMBER_MAP.items()}[vars.get('atomnumber')]
             
             if atom_type_assigner_is_missing:
                 atom_data = {
@@ -384,7 +383,7 @@ class NMRDatasetBuilder:
         self,
         pdbcode: str,
         datadir: str,
-        max_structures: int = None,
+        slicing = None,
         downloadurl = "https://files.rcsb.org/download/",
     ):
         """
@@ -410,12 +409,12 @@ class NMRDatasetBuilder:
                 outfnm = os.path.join(datadir, pdbfn)
                 if url is not None and not os.path.isfile(outfnm):
                     urllib.request.urlretrieve(url, outfnm)
-            return self.parsepdb(pdbcode, outfnm, max_structures)
+            return self.parsepdb(pdbcode, outfnm, slicing=slicing)
         except Exception as err:
             logging.warning(f"Skipping {pdbcode} | {str(err)}")
             return None
 
-    def parsepdb(self, pdbcode, pdb, max_structures):
+    def parsepdb(self, pdbcode, pdb, slicing):
         pdb_info = self.get_pdb_info(pdbcode, pdb)
         
         if not pdb_info.get('pdb_has_hydrogens', False):
@@ -431,7 +430,23 @@ class NMRDatasetBuilder:
             fixer.addMissingHydrogens(pdb_info.get('pdb_ph', 7.0), forcefield=forcefield)
             PDBFile.writeFile(fixer.topology, fixer.positions, open(pdb, 'w'))
         
-        u = mda.Universe(pdb)
+        data = self.read_traj(pdb, slicing=slicing, remove_clashes=True)
+        data.update(pdb_info)
+        return data
+    
+    def parseinput(self, topology, traj=None, slicing=None, ph=None, temperature=None):
+        info = {}
+        if ph is not None: info['pdb_ph']   = ph
+        if temperature is not None: info['pdb_temp'] = temperature
+
+        data = self.read_traj(topology, traj=traj, slicing=slicing)
+        data.update(info)
+        return data
+
+    def read_traj(self, topology, traj: Optional[List[str]]=None, slicing=None, remove_clashes=False):
+        if traj is None:
+            traj = []
+        u = mda.Universe(topology, *traj)
         mol = u.select_atoms('all')
 
         atom_chains     = []
@@ -461,7 +476,7 @@ class NMRDatasetBuilder:
 
             try:    atom_element = atom.element
             except: atom_element = atom.type
-            atom_numbers.append(atomic_number_map[atom_element])
+            atom_numbers.append(ATOMIC_NUMBER_MAP[atom_element])
 
             atom_data.append({
                 "chainID"  : atom_chain,
@@ -480,20 +495,23 @@ class NMRDatasetBuilder:
         atom_types      = {k: np.array(v) for k, v in self.atom_type_assigner.assign_atom_types(atom_data).items()}
 
         coords = []
-        for ts in u.trajectory:
+        if slicing is None: slicing = slice(0, None, 1)
+        for ts in u.trajectory[slicing]:
             coords.append(mol.positions)
         coords = np.stack(coords, axis=0)
 
         # - Remove clashing atoms - #
-        mask = np.triu_indices(coords.shape[1], k=1)
-        lengths = np.linalg.norm(coords[:, mask[0]] - coords[:, mask[1]], axis=-1)
-        keep_edges = np.all(lengths > 0.5, axis=0)
-        keep_idcs = np.union1d(np.unique(mask[0][keep_edges]), np.unique(mask[1][keep_edges]))
-        if max_structures is None: max_structures = len(coords)
+        if remove_clashes:
+            mask = np.triu_indices(coords.shape[1], k=1)
+            lengths = np.linalg.norm(coords[:, mask[0]] - coords[:, mask[1]], axis=-1)
+            keep_edges = np.all(lengths > 0.5, axis=0)
+            keep_idcs = np.union1d(np.unique(mask[0][keep_edges]), np.unique(mask[1][keep_edges]))
+        else:
+            keep_idcs = np.arange(coords.shape[1])
 
         # Build dataset
         data = {
-            "coords"         : coords[:max_structures, keep_idcs],
+            "coords"         : coords[:, keep_idcs],
             "atom_chains"    : atom_chains[keep_idcs],
             "atom_resnumbers": atom_resnumbers[keep_idcs],
             "atom_resnames"  : atom_resnames[keep_idcs],
@@ -503,8 +521,6 @@ class NMRDatasetBuilder:
         }
         atom_types = {k: v[keep_idcs] for k, v in atom_types.items()}
         data.update(atom_types)
-        data.update(pdb_info)
-
         return data
     
     def get_pdb_info(self, pdbcode, pdb) -> dict:
@@ -573,6 +589,7 @@ class NMRDatasetBuilder:
         def align_nmr2pdb(pdb: dict, nmr: OrderedDict):
 
             from Bio import pairwise2
+
 
             three_to_one = {
                 # Amino acids
@@ -671,10 +688,14 @@ class NMRDatasetBuilder:
                 chains = chains[np.sort(idx)]
                 renumbered_pdb = []
                 renumbered_nmr = []
+                renumbered_nmr_values = []
                 
                 for chain_id in chains:
                     pdb_chain = [entry for entry in pdb if entry.startswith(chain_id)]
-                    nmr_chain = [entry for entry in nmr if entry.startswith(chain_id)]
+                    nmr_tuple_chain = [(k, v) for k, v in nmr.items() if k.startswith(chain_id)]
+                    nmr_chain = [entry[0] for entry in nmr_tuple_chain]
+                    nmr_values_chain = [entry[1] for entry in nmr_tuple_chain]
+                    renumbered_nmr_values.extend(nmr_values_chain)
                     
                     if pdb_chain and nmr_chain:
                         pdb_res, nmr_res = align_and_renumber(pdb, nmr, chain_id)
@@ -685,14 +706,14 @@ class NMRDatasetBuilder:
                         renumbered_pdb.extend(pdb_chain)
                         renumbered_nmr.extend(nmr_chain)
                 
-                return np.array(renumbered_pdb), np.array(renumbered_nmr)
+                return np.array(renumbered_pdb), np.array(renumbered_nmr), np.array(renumbered_nmr_values)
 
             # Run the alignment and renumbering
             return renumber_residues_with_chains(pdb, nmr)
 
-        aligned_pdb, aligned_nmr = align_nmr2pdb(pdb.get('atom_fullnames'), np.array(list(nmr.keys())))
+        aligned_pdb, aligned_nmr, aligned_nmr_values = align_nmr2pdb(pdb.get('atom_fullnames'), nmr)
         pdb['aligned_atom_fullnames'] = aligned_pdb
-        nmr = {aligned_k: v for aligned_k, v in zip(aligned_nmr, nmr.values())}
+        nmr = {aligned_k: v for aligned_k, v in zip(aligned_nmr, aligned_nmr_values)}
         nmr_cs_list = [nmr[atom_fullname] if atom_fullname in nmr else np.nan for atom_fullname in pdb.get('aligned_atom_fullnames')]
         num_structures = len(pdb.get('coords'))
 
@@ -780,15 +801,35 @@ class NMRDatasetBuilder:
             self.save_dataset_info(data_root)
     
     def extract_outliers(self):
+
         logging.info(f'--- EXTRACTING OUTLIERS ---')
         outliers = []
         for key, df in self.statistics.items():
             resname, atomname = key
+            df = df.dropna(subset=[atomname])
+            if len(df) < 10:
+                continue  # Skip small datasets
+
+            # Use IsolationForest to detect outliers
+            clf = IsolationForest(contamination=0.005, random_state=42)
+            df['outlier'] = clf.fit_predict(df[[atomname]])
+
+            # Calculate mean and standard deviation
             mean = df[atomname].mean()
-            std  = df[atomname].std()
-            threshold_min = mean - 3*std
-            threshold_max = mean + 3*std
-            outliers.append(df[(df[atomname] < threshold_min) | (df[atomname] > threshold_max)])
+            std = df[atomname].std()
+
+            # Identify outliers based on IsolationForest and 3*std distance from mean
+            df['distance_from_mean'] = np.abs(df[atomname] - mean)
+            df['is_outlier'] = (df['outlier'] == -1) & (df['distance_from_mean'] > 4 * std)
+
+            outliers_df = df[df['is_outlier']]
+            outliers_df = outliers_df.drop(columns=['outlier', 'distance_from_mean', 'is_outlier'])
+            outliers_df = outliers_df.dropna(axis=1, how='all')
+            outliers_df = outliers_df.rename(columns={atomname: 'CS'})
+            outliers_df = outliers_df.assign(ATOMNAME=atomname)
+            if len(outliers_df) > 0:
+                outliers.append(outliers_df)
+        
         if len(outliers) == 0:
             logging.info(f'- No outliers found -')
             return
@@ -809,14 +850,12 @@ class NMRDatasetBuilder:
                 ds = dict(np.load(self.npz_filename(data_root, pdbcode, bmrbid)))
                 keys = ds['aligned_atom_fullnames']
                 for _, row in df.iterrows():
-                    num_match_columns = len(self.match_columns)
-                    atomname = df.columns[num_match_columns + np.nonzero(~np.isnan(row.values[num_match_columns:].astype(float)))[0].item()]
-                    query = f"{row['CHAINID']}.{row['RESNUM']}.{row['RESNAME']}.{atomname}"
+                    query = f"{row['CHAINID']}.{row['RESNUM']}.{row['RESNAME']}.{row['ATOMNAME']}"
                     fltr = np.argwhere(keys == query).flatten()
                     try:
-                        error = f"Mismatch between outlier value ({row[atomname]}) and npz dataset values ({ds['chemical_shifts'][:, fltr].flatten()}). " +\
+                        error = f"Mismatch between outlier value ({row['CS']}) and npz dataset values ({ds['chemical_shifts'][:, fltr].flatten()}). " +\
                         f"pdbcode: {pdbcode} bmrbid: {bmrbid} index: {fltr.flatten()} name: {ds['aligned_atom_fullnames'][fltr]}"
-                        assert np.all(ds['chemical_shifts'][:, fltr] == row[atomname]), error
+                        assert np.all(ds['chemical_shifts'][:, fltr] == row['CS']), error
                     except AssertionError as e:
                         if np.all(np.isnan(ds['chemical_shifts'][:, fltr])):
                             logging.debug(f"Filename {self.format_npz(pdbcode, bmrbid)}: chemical shifts for outlier atom '{query}' were already excluded.")
@@ -849,3 +888,27 @@ class NMRDatasetBuilder:
         
         with open(self.node_type_stats(data_root), 'w') as f:
             f.write(txt)
+    
+    def plot_distribution(self, resnames: List[str], atomnames: Optional[List[str]] = None, save=False):
+        import plotly.express as px
+        for resname in resnames:
+            for atomname in atomnames:
+                try:
+                    data = self.statistics.get((resname, atomname))
+                    if len(data) == 0:
+                        return
+                    fig = px.histogram(
+                        data,
+                        x=atomname,
+                        color='PDB_FILENAME',
+                        marginal="rug", # can be `box`, `violin`
+                        hover_data=data.columns,
+                        nbins=100,
+                        title=f"{resname}-{atomname}",
+                        
+                    )
+                    fig.show()
+                    if save:
+                        fig.write_html(f"../media/{resname}-{atomname}.html")
+                except:
+                    pass

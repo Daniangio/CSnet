@@ -14,7 +14,13 @@ setup(
     author="Daniele Angioletti, ---",
     description="CSnet.",
     python_requires=">=3.8",
-    packages=find_packages(include=["heqbm", "heqbm.*"]),
+    packages=find_packages(include=["csnet", "csnet.*"]),
+    entry_points={
+        # make the scripts available as command line scripts
+        "console_scripts": [
+            "csnet-build = csnet.scripts.build_dataset:main",
+        ]
+    },
     install_requires=[
         "MDAnalysis",
         "pandas",
