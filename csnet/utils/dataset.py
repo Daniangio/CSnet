@@ -6,8 +6,12 @@ import requests
 import shutil
 import urllib.request
 import numpy as np
-import MDAnalysis as mda
 import pandas as pd
+import difflib
+import mdtraj as md
+
+import MDAnalysis as mda
+# from MDAnalysis.analysis import dihedrals
 
 from typing import List, Optional, Union
 from collections import OrderedDict
@@ -151,10 +155,19 @@ class AtomTypeAssigner:
                 key = self.generate_key(atom, key_format)
                 atom_type_map = self.atom_type_map.get(format_name, dict())
                 if key not in atom_type_map:
-                    assert not self.atom_type_map_is_fixed, f"Using a loaded atom_type_map, but found a new atom_type: {key}"
-                    atom_type_map[key] = self.next_atom_type_dict.get(format_name, 0)
-                    self.next_atom_type_dict[format_name] = self.next_atom_type_dict.get(format_name, 0) + 1
-                    self.atom_type_map[format_name] = atom_type_map
+                    if self.atom_type_map_is_fixed:
+                        # Find the most similar atom type in the map
+                        closest_matches = difflib.get_close_matches(key, atom_type_map.keys(), n=5)
+                        filtered_matches = [match for match in closest_matches if all(a[0] == b[0] for a, b in zip(match.split('.'), key.split('.')))]
+                        if filtered_matches:
+                            new_key = filtered_matches[0]
+                            logging.warning(f"Using a loaded atom_type_map, but found a new atom_type: {key}. Assigning a similar atom_type: {new_key}")
+                            key = new_key
+                        else: raise ValueError(f"Unknown atom type {key} and no similar type found in atom_type_map.")
+                    else:
+                        atom_type_map[key] = self.next_atom_type_dict.get(format_name, 0)
+                        self.next_atom_type_dict[format_name] = self.next_atom_type_dict.get(format_name, 0) + 1
+                        self.atom_type_map[format_name] = atom_type_map
                 atom_types_list: list = atom_types.get(format_name, [])
                 atom_types_list.append(atom_type_map[key])
                 atom_types[format_name] = atom_types_list
@@ -245,9 +258,8 @@ class NMRDatasetBuilder:
             if pdb is None:
                 continue
 
-            chemical_shifts = self.assign_chemical_shifts(pdb, nmr_cs)
+            pdb = self.align_and_assign_chemical_shifts(pdb, nmr_cs)
 
-            pdb.update({'chemical_shifts': chemical_shifts,})
             if nmr_ph is not None:
                  pdb.update({'nmr_ph': nmr_ph,})
             if nmr_temp is not None:
@@ -261,7 +273,7 @@ class NMRDatasetBuilder:
         self.atom_type_assigner.save_atom_type_map(data_root)
         self.save_dataset_info(data_root)
     
-    def build_inference(self, topology: str, traj: Optional[List[str]]=None, slicing=None, ph=7.0, temperature=298., data_root: str = './'):
+    def build_inference(self, topology: str, traj: Optional[str]=None, slicing=None, ph=7.0, temperature=298., data_root: str = './'):
         os.makedirs(data_root, exist_ok=True)
         os.makedirs(self.npz_datadir(data_root), exist_ok=True)
         logging.info(f'--- BUILDING DATASET ---')
@@ -276,7 +288,7 @@ class NMRDatasetBuilder:
         data = []
 
         for items in zip(
-            pdb.get('aligned_atom_fullnames'),
+            pdb.get('atom_fullnames'),
             pdb.get('atom_numbers'),
             pdb.get('chemical_shifts')[0],
             *[pdb.get(format_name) for format_name in self.atom_type_assigner.key_formats]
@@ -439,14 +451,12 @@ class NMRDatasetBuilder:
         if ph is not None: info['pdb_ph']   = ph
         if temperature is not None: info['pdb_temp'] = temperature
 
-        data = self.read_traj(topology, traj=traj, slicing=slicing)
+        data = self.read_traj(topology, trajectory=traj, slicing=slicing)
         data.update(info)
         return data
 
-    def read_traj(self, topology, traj: Optional[List[str]]=None, slicing=None, remove_clashes=False):
-        if traj is None:
-            traj = []
-        u = mda.Universe(topology, *traj)
+    def read_traj(self, topology, trajectory: Optional[str]=None, slicing=None, remove_clashes=False):
+        u = mda.Universe(topology, trajectory) if trajectory is not None else mda.Universe(topology)
         mol = u.select_atoms('all')
 
         atom_chains     = []
@@ -494,11 +504,39 @@ class NMRDatasetBuilder:
         atom_numbers    = np.array(atom_numbers, dtype=np.int8)
         atom_types      = {k: np.array(v) for k, v in self.atom_type_assigner.assign_atom_types(atom_data).items()}
 
-        coords = []
+        
+        if trajectory is None:
+            traj = md.load(topology)
+        elif trajectory.endswith('.xtc'):
+            traj = md.load_xtc(trajectory, top=topology)
+        elif trajectory.endswith('.trr'):
+            traj = md.load_trr(trajectory, top=topology)
+        sasa = md.shrake_rupley(traj, probe_radius=1.4, mode='residue')
+        dssp = md.compute_dssp(traj, simplified=True)
+
+        coords, atom_sasa, atom_ss = [], [], []
         if slicing is None: slicing = slice(0, None, 1)
         for ts in u.trajectory[slicing]:
             coords.append(mol.positions)
+            frame_atom_sasa = np.zeros((u.atoms.n_atoms), dtype=np.float32)
+            frame_atom_ss   = np.empty((u.atoms.n_atoms), dtype=str)
+            for idx, residue in enumerate(u.residues):
+                ss = dssp[ts.frame, idx]
+                asa = sasa[ts.frame, idx]
+                for atom in residue.atoms:
+                    atom_index = atom.index
+                    frame_atom_sasa[atom_index] = asa
+                    frame_atom_ss[atom_index] = ss
+            atom_sasa.append(frame_atom_sasa)
+            atom_ss.append(frame_atom_ss)
         coords = np.stack(coords, axis=0)
+        atom_sasa = np.stack(atom_sasa)
+        atom_ss = np.stack(atom_ss)
+        ss_mapping = {'C': 0, 'E': 1, 'H': 2, 'N': 3}
+        atom_ss_int = np.vectorize(ss_mapping.get)(atom_ss)
+
+        # rama = dihedrals.Ramachandran(mol).run()
+        # janin = dihedrals.Janin(mol).run()
 
         # - Remove clashing atoms - #
         if remove_clashes:
@@ -518,6 +556,8 @@ class NMRDatasetBuilder:
             "atom_names"     : atom_names[keep_idcs],
             "atom_fullnames" : atom_fullnames[keep_idcs],
             "atom_numbers"   : atom_numbers[keep_idcs],
+            "atom_ss"        : atom_ss_int[:, keep_idcs],
+            "atom_sasa"      : atom_sasa[:, keep_idcs],
         }
         atom_types = {k: v[keep_idcs] for k, v in atom_types.items()}
         data.update(atom_types)
@@ -584,12 +624,11 @@ class NMRDatasetBuilder:
         
         return info
     
-    def assign_chemical_shifts(self, pdb: dict, nmr: OrderedDict):
+    def align_and_assign_chemical_shifts(self, pdb: dict, nmr: OrderedDict):
         
         def align_nmr2pdb(pdb: dict, nmr: OrderedDict):
 
             from Bio import pairwise2
-
 
             three_to_one = {
                 # Amino acids
@@ -711,14 +750,30 @@ class NMRDatasetBuilder:
             # Run the alignment and renumbering
             return renumber_residues_with_chains(pdb, nmr)
 
-        aligned_pdb, aligned_nmr, aligned_nmr_values = align_nmr2pdb(pdb.get('atom_fullnames'), nmr)
-        pdb['aligned_atom_fullnames'] = aligned_pdb
-        nmr = {aligned_k: v for aligned_k, v in zip(aligned_nmr, aligned_nmr_values)}
-        nmr_cs_list = [nmr[atom_fullname] if atom_fullname in nmr else np.nan for atom_fullname in pdb.get('aligned_atom_fullnames')]
-        num_structures = len(pdb.get('coords'))
+        pdb_atom_fullnames = pdb.get('atom_fullnames')
+        aligned_pdb_atom_fullnames, aligned_nmr_atom_fullnames, aligned_nmr_values = align_nmr2pdb(pdb_atom_fullnames, nmr)
+        # Find indices which turn pdb_atom_fullnames to aligned_pdb_atom_fullnames
+        sort_idx = pdb_atom_fullnames.argsort()
+        alignment_indices = sort_idx[np.searchsorted(pdb_atom_fullnames , aligned_pdb_atom_fullnames, sorter = sort_idx)]
 
+        # Update pdb by reindexing all keys
+        for key, value in pdb.items():
+            if not isinstance(value, np.ndarray):
+                continue
+            for dim in range(value.ndim):
+                if value.shape[dim] == len(alignment_indices):
+                    indexer = [slice(None)] * dim + [alignment_indices]
+                    pdb[key] = value[tuple(indexer)]
+                    break
+        
+        # Assign chemical shifts
+        nmr = {aligned_k: v for aligned_k, v in zip(aligned_nmr_atom_fullnames, aligned_nmr_values)}
+        nmr_cs_list = [nmr[atom_fullname] if atom_fullname in nmr else np.nan for atom_fullname in aligned_pdb_atom_fullnames]
+        num_structures = len(pdb.get('coords'))
         chemical_shifts = np.tile(np.array(nmr_cs_list), (num_structures, 1))
-        return chemical_shifts
+        pdb['chemical_shifts'] = chemical_shifts
+        
+        return pdb
 
     def filter_npz_datasets(
         self,
