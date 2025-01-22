@@ -110,7 +110,10 @@ class AtomTypeAssigner:
         try:
             if atom_type_map and os.path.isfile(atom_type_map):
                 with open(atom_type_map, 'r') as f:
-                    self.atom_type_map = dict(yaml.safe_load(f))
+                    atom_type_map = dict(yaml.safe_load(f))
+                    for k, v in atom_type_map.items():
+                        new_v = {_k.upper(): _v for _k, _v in v.items()}
+                        self.atom_type_map[k] = new_v
                 return True
         except:
             logging.warning(f"Failed loading file {atom_type_map}")
@@ -141,7 +144,7 @@ class AtomTypeAssigner:
         Generate a key for the atom based on the key_format.
         """
         atom = self.remap_atom(atom)  # Apply remapping rules
-        key = key_format.format(**atom)
+        key = key_format.format(**atom).upper()
         return self.group_map.get(key, key)  # Map to group leader if applicable
 
     def assign_atom_types(self, atoms):
@@ -157,8 +160,8 @@ class AtomTypeAssigner:
                 if key not in atom_type_map:
                     if self.atom_type_map_is_fixed:
                         # Find the most similar atom type in the map
-                        closest_matches = difflib.get_close_matches(key, atom_type_map.keys(), n=5)
-                        filtered_matches = [match for match in closest_matches if all(a[0] == b[0] for a, b in zip(match.split('.'), key.split('.')))]
+                        closest_matches = difflib.get_close_matches(key.upper(), atom_type_map.keys(), n=5)
+                        filtered_matches = [match for match in closest_matches if all(a[0] == b[0] for a, b in zip(match.split('.'), key.upper().split('.')))]
                         if filtered_matches:
                             new_key = filtered_matches[0]
                             logging.warning(f"Using a loaded atom_type_map, but found a new atom_type: {key}. Assigning a similar atom_type: {new_key}")
@@ -391,13 +394,7 @@ class NMRDatasetBuilder:
                     temp = float(row[1])
         return cs, ph, temp
 
-    def getpdb(
-        self,
-        pdbcode: str,
-        datadir: str,
-        slicing = None,
-        downloadurl = "https://files.rcsb.org/download/",
-    ):
+    def getpdb(self, pdbcode: str, datadir: str, slicing = None, downloadurl = "https://files.rcsb.org/download/"):
         """
         Downloads a PDB file from the Internet and saves it in a data directory.
         :param pdbcode: The standard PDB ID e.g. '3ICB' or '3icb'. You can also provide directly a pdb filename (ending in .pdb) which is already locally stored.
@@ -486,7 +483,7 @@ class NMRDatasetBuilder:
 
             try:    atom_element = atom.element
             except: atom_element = atom.type
-            atom_numbers.append(ATOMIC_NUMBER_MAP[atom_element])
+            atom_numbers.append(ATOMIC_NUMBER_MAP.get(atom_element.upper()))
 
             atom_data.append({
                 "chainID"  : atom_chain,
@@ -775,14 +772,7 @@ class NMRDatasetBuilder:
         
         return pdb
 
-    def filter_npz_datasets(
-        self,
-        data_root: str = './',
-        ph_range   = [5., 9.],
-        ph_max_diff = 1.,
-        temp_range = [270, 350],
-        temp_max_diff = 20.,
-    ):
+    def filter_npz_datasets(self, data_root: str = './', ph_range   = [5., 9.], ph_max_diff = 2., temp_range = [250, 350], temp_max_diff = 50.):
         if self.dataset_info is None:
             self.build_dataset_info_from_npz(data_root)
         
@@ -823,7 +813,11 @@ class NMRDatasetBuilder:
     def build_statistics(self, data_root: str = './', rebuild=False):
         logging.info(f'--- BUILDING STATISTICS ---')
         if rebuild or self.dataset_info is None:
-            self.build_dataset_info_from_npz(data_root, save=not rebuild)
+            if os.path.isfile(self.dataset_info_filename(data_root)):
+                self.__dataset_info = pd.read_csv(self.dataset_info_filename(data_root))
+                logging.info(f'Dataset info file loaded from {self.dataset_info_filename(data_root)}')
+            else:
+                self.build_dataset_info_from_npz(data_root, save=not rebuild)
 
         df = self.dataset_info
         statistics = {}
@@ -903,13 +897,13 @@ class NMRDatasetBuilder:
                     continue
                 df = pdbcode_outliers[pdbcode_outliers['NMR_FILENAME'] == bmrbid]
                 ds = dict(np.load(self.npz_filename(data_root, pdbcode, bmrbid)))
-                keys = ds['aligned_atom_fullnames']
+                atom_fullnames = ds['atom_fullnames']
                 for _, row in df.iterrows():
                     query = f"{row['CHAINID']}.{row['RESNUM']}.{row['RESNAME']}.{row['ATOMNAME']}"
-                    fltr = np.argwhere(keys == query).flatten()
+                    fltr = np.argwhere(atom_fullnames == query).flatten()
                     try:
                         error = f"Mismatch between outlier value ({row['CS']}) and npz dataset values ({ds['chemical_shifts'][:, fltr].flatten()}). " +\
-                        f"pdbcode: {pdbcode} bmrbid: {bmrbid} index: {fltr.flatten()} name: {ds['aligned_atom_fullnames'][fltr]}"
+                        f"pdbcode: {pdbcode} bmrbid: {bmrbid} index: {fltr.flatten()} name: {atom_fullnames[fltr]}"
                         assert np.all(ds['chemical_shifts'][:, fltr] == row['CS']), error
                     except AssertionError as e:
                         if np.all(np.isnan(ds['chemical_shifts'][:, fltr])):
