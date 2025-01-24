@@ -250,7 +250,7 @@ class NMRDatasetBuilder:
                os.path.isfile(self.npz_excluded_filename(data_root, pdbcode, bmrbid)):
                 try:    pdb = dict(np.load(self.npz_filename(data_root, pdbcode, bmrbid)))
                 except: pdb = dict(np.load(self.npz_excluded_filename(data_root, pdbcode, bmrbid)))
-                self.update_dataset_info(pdb, pdbcode, bmrbid)
+                self.update_dataset_info(pdb, pdbcode, bmrbid, atom_type_assigner_is_missing=True)
                 continue
             try:
                 nmr_cs, nmr_ph, nmr_temp = self.getcs(bmrbid, datadir=os.path.join(data_root, 'bmrb.cs'))
@@ -322,7 +322,7 @@ class NMRDatasetBuilder:
                 for format_name_key_format_tuple, atom_type in vars.items():
                     if not isinstance(format_name_key_format_tuple, tuple) : continue
                     format_name, key_format = format_name_key_format_tuple
-                    self.atom_type_assigner.read_atom_types(atom_data, format_name, key_format, atom_type)
+                    self.atom_type_assigner.read_atom_types(atom_data, format_name, key_format, atom_type.item())
             
             if np.isnan(vars.get('cs')):
                 continue
@@ -527,6 +527,11 @@ class NMRDatasetBuilder:
             atom_sasa.append(frame_atom_sasa)
             atom_ss.append(frame_atom_ss)
         coords = np.stack(coords, axis=0)
+        # Check overlapping (soft algorithm)
+        dists = np.linalg.norm(coords[:, 1:] - coords[:, :-1], axis=-1)
+        if np.any(dists < 0.5):
+            raise Exception(f"Found clashing atoms (distance < 0.5 Angstrom)")
+
         atom_sasa = np.stack(atom_sasa)
         atom_ss = np.stack(atom_ss)
         ss_mapping = {'C': 0, 'E': 1, 'H': 2, 'N': 3}
@@ -772,7 +777,7 @@ class NMRDatasetBuilder:
         
         return pdb
 
-    def filter_npz_datasets(self, data_root: str = './', ph_range   = [5., 9.], ph_max_diff = 2., temp_range = [250, 350], temp_max_diff = 50.):
+    def filter_npz_datasets(self, data_root: str = './', ph_range   = [5., 9.], ph_max_diff = 2., temp_range = [278, 350], temp_max_diff = 20.):
         if self.dataset_info is None:
             self.build_dataset_info_from_npz(data_root)
         
@@ -925,18 +930,44 @@ class NMRDatasetBuilder:
             for type_name, atom_type in sorted(atom_type_map.items(), key=lambda x: x[1]):
                 resname, atomname = type_name.split('.')
                 type_names_txt    += f'  - {type_name:12}# | {atom_type}\n'
-                stats = self.statistics.get(tuple([resname, atomname]), None)
-                if stats is not None:
-                    per_type_bias_txt += f'  - {np.nan_to_num(stats[atomname].mean(), 0.):8.4f}    # {type_name:12}| {atom_type}\n'
-                    per_type_std_txt  += f'  - {np.nan_to_num(stats[atomname].std(),  1.):8.4f}    # {type_name:12}| {atom_type}\n'
+
+                keys = self.get_keys_from_statistics(resname, atomname)
+                values = []
+                for key in keys:
+                    stats = self.statistics.get(key)
+                    stat_resname, stat_atomname = key
+                    values.append(stats[stat_atomname].values)
+
+                if len(values) > 0:
+                    values = np.concatenate(values)
+                    values = values[~np.isnan(values)]
+                    per_type_bias_txt += f'  - {np.nan_to_num(values.mean(), 0.):8.3f}    # {type_name:12}| {atom_type}\n'
+                    per_type_std_txt  += f'  - {max(np.nan_to_num(values.std(),  1.), 1.e-3):8.3f}    # {type_name:12}| {atom_type}\n'
                 else:
-                    per_type_bias_txt += f'  - {0.:8.4f}    # {type_name:12}| {atom_type}\n'
-                    per_type_std_txt  += f'  - {1.:8.4f}    # {type_name:12}| {atom_type}\n'
+                    per_type_bias_txt += f'  - {0.:8.3f}    # {type_name:12}| {atom_type}\n'
+                    per_type_std_txt  += f'  - {1.:8.3f}    # {type_name:12}| {atom_type}\n'
             
         txt = f'{type_names_txt}\n\n{per_type_bias_txt}\n\n{per_type_std_txt}'
         
         with open(self.node_type_stats(data_root), 'w') as f:
             f.write(txt)
+    
+    def get_keys_from_statistics(self, resname, atomname):
+        for format_name, key_format in self.atom_type_assigner.key_formats.items():
+            if format_name == 'atom_types':
+                break
+        keys = []
+        for key in self.statistics.keys():
+            stat_resname, stat_atomname = key
+            atom = {
+                'resname' : stat_resname,
+                'atomname': stat_atomname,
+                'element' : stat_atomname,
+            }
+            type_atomname = self.atom_type_assigner.generate_key(atom, key_format)
+            if f"{resname}.{atomname}" == type_atomname:
+                keys.append(key)
+        return keys
     
     def plot_distribution(self, resnames: List[str], atomnames: Optional[List[str]] = None, save=False):
         import plotly.express as px
