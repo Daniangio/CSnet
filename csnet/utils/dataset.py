@@ -17,7 +17,6 @@ from typing import List, Optional, Union
 from collections import OrderedDict
 from pathlib import Path
 
-from pdbfixer import PDBFixer
 from openmm.app import PDBFile, ForceField
 from sklearn.ensemble import IsolationForest
 from geqtrain.utils import ATOMIC_NUMBER_MAP
@@ -428,6 +427,7 @@ class NMRDatasetBuilder:
         
         if not pdb_info.get('pdb_has_hydrogens', False):
             # Add Hydrogens
+            from pdbfixer import PDBFixer
             forcefield = ForceField('amber14-all.xml', 'amber14/tip3p.xml')
             fixer = PDBFixer(pdb)
             fixer.findMissingResidues()
