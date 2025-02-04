@@ -37,7 +37,7 @@ class NodeSimpleLoss(SimpleLoss): # SimpleLoss with Rereference
         **kwargs,
     ):
         ref_key = ref.get(key, None)
-        assert isinstance(ref_key, torch.Tensor), f"Expected prediction tensor for ref key {key}, found {type(pred_key)}"
+        assert isinstance(ref_key, torch.Tensor), f"Expected prediction tensor for ref key {key}, found {type(ref_key)}"
         pred_key = pred.get(key, None)
         assert isinstance(pred_key, torch.Tensor), f"Expected prediction tensor for pred key {key}, found {type(pred_key)}"
         center_nodes_filter = pred.get(AtomicDataDict.EDGE_INDEX_KEY)[0].unique()
