@@ -20,12 +20,12 @@ class NodeSimpleLoss(SimpleLoss): # SimpleLoss with Rereference
         mean: bool = True,
         **kwargs,
     ):
-        pred_key, ref_key, not_nan_filter, corrections = self.prepare(pred, ref, key, **kwargs)
+        pred_key, ref_key, not_nan_filter, corrections, center_nodes_filter = self.prepare(pred, ref, key, **kwargs)
 
         loss = self.func(pred_key, ref_key) * not_nan_filter
         if mean:
-            penalty = sum(correction ** 2 for correction in corrections)
-            return loss.sum() / not_nan_filter.sum() + penalty
+            # penalty = sum(correction ** 2 for correction in corrections)
+            return loss.sum() / not_nan_filter.sum() # + penalty
         loss[~not_nan_filter.bool()] = torch.nan
         return loss
     
@@ -36,11 +36,16 @@ class NodeSimpleLoss(SimpleLoss): # SimpleLoss with Rereference
         key:  str,
         **kwargs,
     ):
-        pred_key, ref_key, not_nan_filter = super(NodeSimpleLoss, self).prepare(pred, ref, key, **kwargs)
+        ref_key = ref.get(key, None)
+        assert isinstance(ref_key, torch.Tensor), f"Expected prediction tensor for ref key {key}, found {type(pred_key)}"
+        pred_key = pred.get(key, None)
+        assert isinstance(pred_key, torch.Tensor), f"Expected prediction tensor for pred key {key}, found {type(pred_key)}"
         center_nodes_filter = pred.get(AtomicDataDict.EDGE_INDEX_KEY)[0].unique()
-        pred_key       = pred_key[center_nodes_filter]
-        ref_key        = ref_key[center_nodes_filter]
-        not_nan_filter = not_nan_filter[center_nodes_filter]
+        if len(pred_key) > len(center_nodes_filter):
+            pred_key = pred_key[center_nodes_filter]
+        ref_key  = ref_key[center_nodes_filter]
+        pred_key = pred_key.view_as(ref_key)
+        not_nan_filter = self._get_not_nan(pred_key, key) * self._get_not_nan(ref_key, key)
 
         if hasattr(self, "rereference") and self.rereference:
             def rereference(y_pred, y_true, dataset_idcs, node_types, alpha=1.):
@@ -65,11 +70,11 @@ class NodeSimpleLoss(SimpleLoss): # SimpleLoss with Rereference
             # Find the batch index for each node_center
             batch_indices = torch.searchsorted(pred[f'{key}_slices'], node_centers, right=False) - 1
             # Apply offsets to targets
-            corrections = list(rereference(pred_key, ref_key, pred[AtomicDataDict.DATASET_INDEX_KEY][batch_indices], pred[AtomicDataDict.ATOM_NUMBER_KEY][node_centers], alpha))
+            corrections = list(rereference(pred_key, ref_key, pred[AtomicDataDict.BATCH_KEY][batch_indices], pred[AtomicDataDict.ATOM_NUMBER_KEY][node_centers], alpha))
         else:
             corrections = []
 
-        return pred_key, ref_key, not_nan_filter, corrections
+        return pred_key, ref_key, not_nan_filter, corrections, center_nodes_filter
 
 
 class GPLoss(SimpleLoss): # Marginal Log Likelihood
@@ -101,9 +106,9 @@ class GPLoss(SimpleLoss): # Marginal Log Likelihood
         
         assert mean
         loss = -self.obj(pred_key, ref_key.transpose(0, 1))
-        penalty = sum(correction ** 2 for correction in corrections)
-        return loss + penalty
-    
+        # penalty = sum(correction ** 2 for correction in corrections)
+        return loss # + 0.1 * penalty
+
     def prepare(
         self,
         pred: Dict,
@@ -112,7 +117,7 @@ class GPLoss(SimpleLoss): # Marginal Log Likelihood
         **kwargs,
     ):
         pred_key = pred.get(key)
-        ref_key = ref.get(key)
+        ref_key = ref.get(key, ref.get(key[:-5]))
         
         center_nodes_filter = pred.get(AtomicDataDict.EDGE_INDEX_KEY)[0].unique()
         ref_key = ref_key[center_nodes_filter]
@@ -174,8 +179,8 @@ class GPMAELoss(GPLoss):
         loss = self.func(pred_key.mean.transpose(-1, -2), ref_key)
         if mean:
             loss = loss.mean()
-            penalty = sum(correction ** 2 for correction in corrections)
-            return loss + penalty
+            # penalty = sum(correction ** 2 for correction in corrections)
+            return loss # + penalty
         return self.likelihood(loss).mean
 
 
@@ -218,15 +223,13 @@ class GPdpllMAELoss(GPdpllLoss):
         **kwargs,
     ):
         pred_key, ref_key, corrections = self.prepare(pred, ref, key, **kwargs)
-
         loss = self.func(pred_key.mean, ref_key.transpose(0, 1))
         loss = loss.mean(dim=-2)
         if mean:
             loss = loss.mean()
-            penalty = sum(correction ** 2 for correction in corrections)
-            return loss + penalty
+            # penalty = sum(correction ** 2 for correction in corrections)
+            return loss # + penalty
         return loss
-
 
 class NoiseLoss(SimpleLoss):
     """
@@ -251,3 +254,72 @@ class NoiseLoss(SimpleLoss):
         pred_key, ref_key, not_nan_filter = super(NoiseLoss, self).prepare(pred, ref, key, **kwargs)
         ref_key = -ref_key
         return pred_key, ref_key, not_nan_filter
+
+
+class GNLLoss(SimpleLoss): # Uncertainty-aware loss.
+    """
+    """
+
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+    ):
+
+        self.func_name = func_name
+        for key, value in params.items():
+            setattr(self, key, value)
+
+        # instanciates torch.nn loss func
+        self.func = torch.nn.GaussianNLLLoss()
+
+    def __call__(
+        self,
+        pred: dict,
+        ref : dict,
+        key : str ,
+        mean: bool = True,
+        **kwargs,
+    ):
+        pred_key, ref_key, not_nan_filter = self.prepare(pred, ref, key, **kwargs)
+
+        loss = self.func(pred_key, ref_key, pred['uncertainty']**2) * not_nan_filter
+        if mean:
+            return loss.sum() / not_nan_filter.sum()
+        loss[~not_nan_filter.bool()] = torch.nan
+        return loss
+
+
+class GNLNodeLoss(NodeSimpleLoss): # Uncertainty-aware loss.
+    """
+    """
+
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+    ):
+
+        self.func_name = func_name
+        for key, value in params.items():
+            setattr(self, key, value)
+
+        # instanciates torch.nn loss func
+        self.func = torch.nn.GaussianNLLLoss(reduction='none')
+
+    def __call__(
+        self,
+        pred: dict,
+        ref : dict,
+        key : str ,
+        mean: bool = True,
+        **kwargs,
+    ):
+        pred_key, ref_key, not_nan_filter, corrections, center_nodes_filter = self.prepare(pred, ref, key, **kwargs)
+        uncertainty = pred['uncertainty'][center_nodes_filter]
+
+        loss = self.func(pred_key, ref_key, uncertainty**2) * not_nan_filter
+        if mean:
+            return loss.sum() / not_nan_filter.sum()
+        loss[~not_nan_filter.bool()] = torch.nan
+        return loss

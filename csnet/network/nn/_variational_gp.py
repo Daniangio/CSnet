@@ -40,6 +40,7 @@ class VariationalGPModule(GraphModuleMixin, torch.nn.Module):
         self.func = func
         self.field = field
         self.out_field = out_field
+        self.out_field_dspp = out_field + '_dspp'
 
         # check and init irreps
         func_irreps_out = func.irreps_out
@@ -60,7 +61,7 @@ class VariationalGPModule(GraphModuleMixin, torch.nn.Module):
         # This module will scale the NN features so that they're nice values
         self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(-10., 10.)
 
-        func_irreps_out.update({self.out_field: out_irreps})
+        func_irreps_out.update({self.out_field: out_irreps, self.out_field_dspp: out_irreps})
         self._init_irreps(
             irreps_in=func.irreps_in,
             my_irreps_in={AtomicDataDict.POSITIONS_KEY: Irreps("1o")},
@@ -77,7 +78,8 @@ class VariationalGPModule(GraphModuleMixin, torch.nn.Module):
         # features = features.transpose(-1, -2).unsqueeze(-1)
         res = self.gp_module(features)
 
-        data[self.out_field] = res
+        data[self.out_field_dspp] = res
+        data[self.out_field] = res.mean
 
         return data
 

@@ -25,6 +25,7 @@ setup(
         "MDAnalysis",
         "pandas",
         "plotly",
+        "gpytorch",
     ],
     zip_safe=True,
 )

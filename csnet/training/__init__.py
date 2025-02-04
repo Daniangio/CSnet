@@ -1,4 +1,4 @@
-from ._loss import NodeSimpleLoss, GPLoss, GPMAELoss, GPdpllLoss, GPdpllMAELoss, NoiseLoss
+from ._loss import NodeSimpleLoss, GPLoss, GPMAELoss, GPdpllLoss, GPdpllMAELoss, NoiseLoss, GNLLoss, GNLNodeLoss
 from .dataset import build_dataset
 
 __all__ = [
@@ -9,4 +9,6 @@ __all__ = [
     GPdpllLoss,
     GPdpllMAELoss,
     NoiseLoss,
+    GNLLoss,
+    GNLNodeLoss,
 ]

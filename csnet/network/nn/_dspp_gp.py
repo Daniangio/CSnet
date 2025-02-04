@@ -73,6 +73,7 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
         self.field = field
         self.out_field = out_field
+        self.out_field_dspp = out_field + '_dspp'
         self.scale_to_bounds = scale_to_bounds
         self.head = head
 
@@ -80,7 +81,7 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
             irreps_in=irreps_in,
             my_irreps_in={AtomicDataDict.POSITIONS_KEY: Irreps("1o")},
         )
-        self.irreps_out.update({self.out_field: out_irreps})
+        self.irreps_out.update({self.out_field: out_irreps, self.out_field_dspp: out_irreps})
 
         # Scaling
         if per_type_bias is not None:
@@ -134,8 +135,9 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
             features = self.distribution(mean, covar)
         except:
             features = features * torch.nan
-        data[self.out_field] = features
-
+        
+        data[self.out_field_dspp] = features
+        data[self.out_field] = features.mean
         return data
 
     # Implement __call__ to skip output validation, which does not accept dict as output
@@ -207,6 +209,7 @@ class DSPPHiddenModule(DSPPLayer):
 
         # add_tags_to_parameters(self, 'strengthen')
 
+    @torch.jit.ignore
     def forward(self, x):
         mean = self.mean_module(x)
         covar = self.covar_module(x)
