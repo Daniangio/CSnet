@@ -1,3 +1,4 @@
+from functools import partial
 import logging
 import os
 import yaml
@@ -11,7 +12,8 @@ import difflib
 import mdtraj as md
 
 import MDAnalysis as mda
-# from MDAnalysis.analysis import dihedrals
+from MDAnalysis.analysis import dihedrals
+from multiprocessing import Pool
 
 from typing import List, Optional, Union
 from collections import OrderedDict
@@ -102,8 +104,15 @@ class AtomTypeAssigner:
         return os.path.join(data_root, 'atom_type_map.yaml')
     
     def save_atom_type_map(self, data_root):
+        self.order_atom_type_map()
         with open(self.filename(data_root), 'w') as f:
             yaml.safe_dump(self.atom_type_map, f)
+    
+    def order_atom_type_map(self):
+        self.atom_type_map = {
+            format_name: {k: v for k, v in sorted(kv_format.items(), key=lambda x: x[1])}
+            for format_name, kv_format in self.atom_type_map.items()
+        }
 
     def load_atom_type_map(self, atom_type_map):
         try:
@@ -185,6 +194,7 @@ class AtomTypeAssigner:
 class NMRDatasetBuilder:
     def __init__(self, config, atom_type_map=None):
         self.atom_type_assigner = AtomTypeAssigner(config, atom_type_map)
+        self.can_use_multiprocessing = self.atom_type_assigner.atom_type_map_is_fixed
         self.match_columns = ['PDB_FILENAME', 'PDB_PH', 'PDB_TEMP', 'NMR_FILENAME', 'NMR_PH', 'NMR_TEMP', 'CHAINID', 'RESNUM', 'RESNAME']
         self._dataset_info = []
         self._last_dataset_info_len = 0
@@ -229,11 +239,44 @@ class NMRDatasetBuilder:
         return os.path.join(data_root, 'dataset_info.csv')
     
     def save_dataset_info(self, data_root):
-        self.dataset_info.to_csv(self.dataset_info_filename(data_root))
-        logging.info(f'Dataset info file saved at {self.dataset_info_filename(data_root)}')
+        if not self.can_use_multiprocessing:
+            self.dataset_info.to_csv(self.dataset_info_filename(data_root))
+            logging.info(f'Dataset info file saved at {self.dataset_info_filename(data_root)}')
+        else:
+            logging.warning(f'Dataset info file creation is not yet supported when using multiprocessing')
     
     def node_type_stats(self, data_root):
         return os.path.join(data_root, 'node_type_statistics.yaml')
+    
+    def process_entry(self, entry, data_root, slicing):
+            pdbcode, bmrbid = entry
+            if os.path.isfile(self.npz_filename(data_root, pdbcode, bmrbid)) or \
+               os.path.isfile(self.npz_excluded_filename(data_root, pdbcode, bmrbid)):
+                try:    pdb = dict(np.load(self.npz_filename(data_root, pdbcode, bmrbid)))
+                except: pdb = dict(np.load(self.npz_excluded_filename(data_root, pdbcode, bmrbid)))
+                self.update_dataset_info(pdb, pdbcode, bmrbid, atom_type_assigner_is_missing=True)
+                return
+            try:
+                nmr_cs, nmr_ph, nmr_temp = self.getcs(bmrbid, datadir=os.path.join(data_root, 'bmrb.cs'))
+            except Exception as e:
+                logging.warning(e)
+                return
+            pdb = self.getpdb(pdbcode, datadir=os.path.join(data_root, 'rcsb.pdb'), slicing=slicing)
+            if pdb is None:
+                return
+
+            pdb = self.align_and_assign_chemical_shifts(pdb, nmr_cs)
+
+            if nmr_ph is not None:
+                pdb.update({'nmr_ph': nmr_ph})
+            if nmr_temp is not None:
+                pdb.update({'nmr_temp': nmr_temp})
+
+            if not self.can_use_multiprocessing:
+                self.update_dataset_info(pdb, pdbcode, bmrbid)
+
+            np.savez(self.npz_filename(data_root, pdbcode, bmrbid), **pdb)
+            logging.info(f'File {self.npz_filename(data_root, pdbcode, bmrbid)} saved!')
     
     def build(self, nmr2pdb: Union[List, str], slicing=None, data_root: str = './'):
         if isinstance(nmr2pdb, str):
@@ -244,34 +287,15 @@ class NMRDatasetBuilder:
         os.makedirs(data_root, exist_ok=True)
         os.makedirs(self.npz_datadir(data_root), exist_ok=True)
         logging.info(f'--- BUILDING DATASET ---')
-        for pdbcode, bmrbid in nmr2pdb:
-            if os.path.isfile(self.npz_filename(data_root, pdbcode, bmrbid)) or \
-               os.path.isfile(self.npz_excluded_filename(data_root, pdbcode, bmrbid)):
-                try:    pdb = dict(np.load(self.npz_filename(data_root, pdbcode, bmrbid)))
-                except: pdb = dict(np.load(self.npz_excluded_filename(data_root, pdbcode, bmrbid)))
-                self.update_dataset_info(pdb, pdbcode, bmrbid, atom_type_assigner_is_missing=True)
-                continue
-            try:
-                nmr_cs, nmr_ph, nmr_temp = self.getcs(bmrbid, datadir=os.path.join(data_root, 'bmrb.cs'))
-            except Exception as e:
-                logging.warning(e)
-                continue
-            pdb = self.getpdb(pdbcode, datadir=os.path.join(data_root, 'rcsb.pdb'), slicing=slicing)
-            if pdb is None:
-                continue
 
-            pdb = self.align_and_assign_chemical_shifts(pdb, nmr_cs)
+        func = partial(self.process_entry, data_root=data_root, slicing=slicing)
+        if self.can_use_multiprocessing:
+            with Pool(processes=32) as pool:
+                pool.map(func, nmr2pdb)
+        else:
+            for entry in nmr2pdb:
+                func(entry)
 
-            if nmr_ph is not None:
-                 pdb.update({'nmr_ph': nmr_ph,})
-            if nmr_temp is not None:
-                 pdb.update({'nmr_temp': nmr_temp,})
-
-            self.update_dataset_info(pdb, pdbcode, bmrbid)
-
-            np.savez(self.npz_filename(data_root, pdbcode, bmrbid), **pdb)
-            logging.info(f'File {self.npz_filename(data_root, pdbcode, bmrbid)} saved!')
-        
         self.atom_type_assigner.save_atom_type_map(data_root)
         self.save_dataset_info(data_root)
     
@@ -293,31 +317,32 @@ class NMRDatasetBuilder:
             pdb.get('atom_fullnames'),
             pdb.get('atom_numbers'),
             pdb.get('chemical_shifts')[0],
+            pdb.get('atom_dihedrals')[0],
             *[pdb.get(format_name) for format_name in self.atom_type_assigner.key_formats]
         ):
             vars = {
                 'fullname'  : items[0],
                 'atomnumber': items[1],
                 'cs'        : items[2],
+                'dihedrals' : items[3],
                 **{
                     (format_name, key_format): _type
                     for (format_name, key_format), _type
-                    in zip(self.atom_type_assigner.key_formats.items(), items[3:])
+                    in zip(self.atom_type_assigner.key_formats.items(), items[4:])
                 }
             }
             
             chainID, resnum, resname, atomname = vars.get('fullname').split('.')
             element = {v: k for k, v in ATOMIC_NUMBER_MAP.items()}[vars.get('atomnumber')]
-            
-            if atom_type_assigner_is_missing:
-                atom_data = {
-                    "chainID"  : chainID,
-                    "resnumber": resnum,
-                    "resname"  : resname,
-                    "atomname" : atomname,
-                    "element"  : element,
-                }
+            atom_data = {
+                "chainID"  : chainID,
+                "resnumber": resnum,
+                "resname"  : resname,
+                "atomname" : atomname,
+                "element"  : element,
+            }
 
+            if atom_type_assigner_is_missing:
                 for format_name_key_format_tuple, atom_type in vars.items():
                     if not isinstance(format_name_key_format_tuple, tuple) : continue
                     format_name, key_format = format_name_key_format_tuple
@@ -325,6 +350,8 @@ class NMRDatasetBuilder:
             
             if np.isnan(vars.get('cs')):
                 continue
+
+            atomtype = self.atom_type_assigner.generate_key(atom_data, '{resname}.{atomname}').split('.')[-1]
             
             def cast_to_item(x):
                 return x.item() if isinstance(x, np.ndarray) else x
@@ -338,7 +365,11 @@ class NMRDatasetBuilder:
                 'CHAINID'     : str(chainID),
                 'RESNUM'      : resnum,
                 'RESNAME'     : resname,
-                atomname      : vars.get('cs'),
+                'PHI'         : vars.get('dihedrals')[0],
+                'PSI'         : vars.get('dihedrals')[1],
+                'CHI1'        : vars.get('dihedrals')[2],
+                'CHI2'        : vars.get('dihedrals')[3],
+                atomtype      : vars.get('cs'),
             }.items()}
 
             data.append(record)
@@ -452,6 +483,24 @@ class NMRDatasetBuilder:
         data.update(info)
         return data
 
+    def compute_rama(self, mol, slicing):
+        # Compute dihedrals
+        try:
+            residues = mol.residues
+            prev = residues._get_prev_residues_by_resid()
+            nxt = residues._get_next_residues_by_resid()
+            keep = np.array([r is not None for r in prev])
+            keep_rama = keep & np.array([r is not None for r in nxt])
+
+            resnames=["ALA", "CYS", "CYX", "GLY", "PRO", "SER", "THR", "VAL"]
+            keep_janin = np.array([r.resname not in resnames for r in residues])
+
+            rama = dihedrals.Ramachandran(mol, check_protein=False).run(start=slicing.start, stop=slicing.stop, step=slicing.step)
+            janin = Janin(mol, select_protein="protein or resname DPN").run(start=slicing.start, stop=slicing.stop, step=slicing.step)
+            return rama.results.angles, keep_rama, janin.results.angles, keep_janin
+        except:
+            return None, None, None, None
+
     def read_traj(self, topology, trajectory: Optional[str]=None, slicing=None, remove_clashes=False):
         u = mda.Universe(topology, trajectory) if trajectory is not None else mda.Universe(topology)
         mol = u.select_atoms('all')
@@ -510,6 +559,9 @@ class NMRDatasetBuilder:
             traj = md.load_trr(trajectory, top=topology)
         sasa = md.shrake_rupley(traj, probe_radius=1.4, mode='residue')
         dssp = md.compute_dssp(traj, simplified=True)
+        rama, keep_rama, janin, keep_janin = self.compute_rama(mol, slicing)
+        atom_dihedrals = np.zeros((len(u.trajectory[slicing]), u.atoms.n_atoms, 4), dtype=np.float32)
+        atom_dihedrals[:] = np.nan
 
         coords, atom_sasa, atom_ss = [], [], []
         if slicing is None: slicing = slice(0, None, 1)
@@ -524,9 +576,21 @@ class NMRDatasetBuilder:
                     atom_index = atom.index
                     frame_atom_sasa[atom_index] = asa
                     frame_atom_ss[atom_index] = ss
+                    if rama is not None:
+                        if keep_rama[idx]:
+                            atom_dihedrals[ts.frame, atom_index, :2] = rama[ts.frame, keep_rama[:idx].sum()]
+                        if keep_janin[idx]:
+                            atom_dihedrals[ts.frame, atom_index, 2:] = janin[ts.frame, keep_janin[:idx].sum()]
             atom_sasa.append(frame_atom_sasa)
             atom_ss.append(frame_atom_ss)
         coords = np.stack(coords, axis=0)
+        atom_dihedrals_periodic = np.zeros((len(u.trajectory[slicing]), u.atoms.n_atoms, 8), dtype=np.float32)
+        rad_atom_dihedrals = np.deg2rad(atom_dihedrals)
+        atom_dihedrals_periodic[..., :-1:2] = np.sin(rad_atom_dihedrals)
+        atom_dihedrals_periodic[..., 1::2]  = np.cos(rad_atom_dihedrals)
+        atom_dihedrals_periodic = np.nan_to_num(atom_dihedrals_periodic)
+        atom_dihedrals_periodic_concat = self.concat_consecutive_residue_feats(atom_dihedrals_periodic, atom_resnumbers, atom_chains)
+
         # Check overlapping (soft algorithm)
         dists = np.linalg.norm(coords[:, 1:] - coords[:, :-1], axis=-1)
         if np.any(dists < 0.5):
@@ -536,9 +600,6 @@ class NMRDatasetBuilder:
         atom_ss = np.stack(atom_ss)
         ss_mapping = {'C': 0, 'E': 1, 'H': 2, 'N': 3}
         atom_ss_int = np.vectorize(ss_mapping.get)(atom_ss)
-
-        # rama = dihedrals.Ramachandran(mol).run()
-        # janin = dihedrals.Janin(mol).run()
 
         # - Remove clashing atoms - #
         if remove_clashes:
@@ -551,20 +612,48 @@ class NMRDatasetBuilder:
 
         # Build dataset
         data = {
-            "coords"         : coords[:, keep_idcs],
-            "atom_chains"    : atom_chains[keep_idcs],
-            "atom_resnumbers": atom_resnumbers[keep_idcs],
-            "atom_resnames"  : atom_resnames[keep_idcs],
-            "atom_names"     : atom_names[keep_idcs],
-            "atom_fullnames" : atom_fullnames[keep_idcs],
-            "atom_numbers"   : atom_numbers[keep_idcs],
-            "atom_ss"        : atom_ss_int[:, keep_idcs],
-            "atom_sasa"      : atom_sasa[:, keep_idcs],
+            "coords"                  : coords[:, keep_idcs],
+            "atom_chains"             : atom_chains[keep_idcs],
+            "atom_resnumbers"         : atom_resnumbers[keep_idcs],
+            "atom_resnames"           : atom_resnames[keep_idcs],
+            "atom_names"              : atom_names[keep_idcs],
+            "atom_fullnames"          : atom_fullnames[keep_idcs],
+            "atom_numbers"            : atom_numbers[keep_idcs],
+            "atom_ss"                 : atom_ss_int[:, keep_idcs],
+            "atom_sasa"               : atom_sasa[:, keep_idcs],
+            "atom_dihedrals"          : atom_dihedrals[:, keep_idcs],
+            "atom_dihedrals_periodic" : atom_dihedrals_periodic[:, keep_idcs],
+            "atom_dihedrals_periodic_concat": atom_dihedrals_periodic_concat[:, keep_idcs],
         }
         atom_types = {k: v[keep_idcs] for k, v in atom_types.items()}
         data.update(atom_types)
         return data
     
+    def concat_consecutive_residue_feats(self, atom_dihedrals_periodic, atom_resnumbers, atom_chains):
+        # Prev, Current and Next residue concat features
+        num_frames, num_atoms, dim = atom_dihedrals_periodic.shape
+        prev_features = np.zeros((num_frames, num_atoms, dim))
+        next_features = np.zeros((num_frames, num_atoms, dim))
+
+        # Iterate through each atom and concatenate features of previous, current, and next residue
+        # Create masks for previous and next residues
+        prev_residue_mask = (atom_resnumbers[:, None] == (atom_resnumbers + 1)) & (atom_chains[:, None] == atom_chains)
+        next_residue_mask = (atom_resnumbers[:, None] == (atom_resnumbers - 1)) & (atom_chains[:, None] == atom_chains)
+
+        def update(_features, _residue_mask, atom_dihedrals_periodic):
+            idcs = np.nonzero(_residue_mask)
+            _, unique_indices = np.unique(idcs[0], return_index=True)
+            unique_src  = idcs[0][unique_indices]
+            unique_dest = idcs[1][unique_indices]
+            src_dest = np.stack([unique_src, unique_dest], axis=0)
+            _features[:, src_dest[0]] = atom_dihedrals_periodic[:, src_dest[1]]
+            return _features
+        
+        prev_features = update(prev_features, prev_residue_mask, atom_dihedrals_periodic)
+        next_features = update(next_features, next_residue_mask, atom_dihedrals_periodic)
+
+        return np.concatenate([prev_features, atom_dihedrals_periodic, next_features], axis=-1, dtype=np.float32)
+
     def get_pdb_info(self, pdbcode, pdb) -> dict:
         try:
             ph, temperature, pdb_has_hydrogens = None, None, False
@@ -631,6 +720,7 @@ class NMRDatasetBuilder:
         def align_nmr2pdb(pdb: dict, nmr: OrderedDict):
 
             from Bio import pairwise2
+
 
             three_to_one = {
                 # Amino acids
@@ -992,3 +1082,93 @@ class NMRDatasetBuilder:
                         fig.write_html(f"../media/{resname}-{atomname}.html")
                 except:
                     pass
+
+
+class Janin(dihedrals.Ramachandran):
+
+    def _single_frame(self):
+        try:
+            chi1_angles = dihedrals.calc_dihedrals(self.ag1.positions, self.ag2.positions,
+                                    self.ag3.positions, self.ag4.positions,
+                                    box=self.ag1.dimensions)
+        except:
+            chi1_angles = np.zeros(len(self.ag1.positions))
+        try:
+            chi2_angles = dihedrals.calc_dihedrals(self.ag2.positions, self.ag3.positions,
+                                    self.ag4.positions, self.ag5.positions,
+                                    box=self.ag1.dimensions)
+        except:
+            chi2_angles = np.zeros(len(self.ag1.positions))
+        chis = [(chi1, chi2) for chi1, chi2 in zip(chi1_angles, chi2_angles)]
+        self.results.angles.append(chis)
+    
+    def __init__(self, atomgroup,
+                 select_remove="resname ALA CYS* GLY PRO SER THR VAL",
+                 select_protein="protein",
+                 **kwargs):
+        r"""Parameters
+        ----------
+        atomgroup : AtomGroup or ResidueGroup
+            atoms for residues for which :math:`\chi_1` and :math:`\chi_2` are
+            calculated
+
+        select_remove : str
+            selection string to remove residues that do not have :math:`chi_2`
+            angles
+
+        select_protein : str
+            selection string to subselect protein-only residues from
+            `atomgroup` to check that only amino acids are selected; if you
+            have non-standard amino acids then adjust this selection to include
+            them
+
+        Raises
+        ------
+        ValueError
+             if the final selection of residues is not contained within the
+             protein (as determined by
+             ``atomgroup.select_atoms(select_protein)``)
+
+        ValueError
+             if not enough or too many atoms are found for a residue in the
+             selection, usually due to missing atoms or alternative locations,
+             or due to non-standard residues
+
+
+        .. versionchanged:: 2.0.0
+           `select_remove` and `select_protein` keywords were added.
+           :attr:`angles` results are now stored in a
+           :class:`MDAnalysis.analysis.base.Results` instance.
+        """
+        super(dihedrals.Ramachandran, self).__init__(
+            atomgroup.universe.trajectory, **kwargs)
+        self.atomgroup = atomgroup
+        residues = atomgroup.residues
+        protein = atomgroup.select_atoms(select_protein).residues
+        remove = residues.atoms.select_atoms(select_remove).residues
+
+        if not residues.issubset(protein):
+            raise ValueError("Found atoms outside of protein. Only atoms "
+                             "inside of a protein "
+                             f"(select_protein='{select_protein}') can be "
+                             "used to calculate dihedrals.")
+        elif len(remove) != 0:
+            warnings.warn(f"All residues selected with '{select_remove}' "
+                          "have been removed from the selection.")
+            residues = residues.difference(remove)
+
+        self.ag1 = residues.atoms.select_atoms("name N")
+        self.ag2 = residues.atoms.select_atoms("name CA")
+        self.ag3 = residues.atoms.select_atoms("name CB")
+        self.ag4 = residues.atoms.select_atoms("name CG CG1")
+        self.ag5 = residues.atoms.select_atoms("name CD CD1 OD1 ND1 SD")
+
+        for i, ag in enumerate([self.ag1, self.ag2, self.ag3, self.ag4, self.ag5]):
+            unique_atoms = {atom.residue: atom for atom in ag}.values()
+            new_ag = ag.universe.select_atoms('index ' + ' '.join(str(atom.index) for atom in unique_atoms))
+            setattr(self, f'ag{i+1}', new_ag)
+        
+
+    def _conclude(self):
+        self.results.angles = (np.rad2deg(np.array(
+            self.results.angles)) + 360) % 360
