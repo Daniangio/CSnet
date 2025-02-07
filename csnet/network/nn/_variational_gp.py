@@ -8,7 +8,7 @@ from e3nn.util.jit import compile_mode
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
-from geqtrain.utils import add_tags_to_parameters
+from geqtrain.utils import add_tags_to_module
 
 
 @compile_mode("script")
@@ -129,7 +129,7 @@ class GaussianProcessModule(gpytorch.models.ApproximateGP):
             num_dims=input_dim,
         )
 
-        add_tags_to_parameters(self, 'strengthen')
+        # add_tags_to_module(self, 'strengthen')
 
     def forward(self, x):
         mean = self.mean_module(x)

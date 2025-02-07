@@ -248,7 +248,7 @@ class NMRDatasetBuilder:
     def node_type_stats(self, data_root):
         return os.path.join(data_root, 'node_type_statistics.yaml')
     
-    def process_entry(self, entry, data_root, slicing):
+    def process_entry(self, entry, data_root, slicing, options):
             pdbcode, bmrbid = entry
             if os.path.isfile(self.npz_filename(data_root, pdbcode, bmrbid)) or \
                os.path.isfile(self.npz_excluded_filename(data_root, pdbcode, bmrbid)):
@@ -261,7 +261,7 @@ class NMRDatasetBuilder:
             except Exception as e:
                 logging.warning(e)
                 return
-            pdb = self.getpdb(pdbcode, datadir=os.path.join(data_root, 'rcsb.pdb'), slicing=slicing)
+            pdb = self.getpdb(pdbcode, datadir=os.path.join(data_root, 'rcsb.pdb'), slicing=slicing, options=options)
             if pdb is None:
                 return
 
@@ -278,7 +278,7 @@ class NMRDatasetBuilder:
             np.savez(self.npz_filename(data_root, pdbcode, bmrbid), **pdb)
             logging.info(f'File {self.npz_filename(data_root, pdbcode, bmrbid)} saved!')
     
-    def build(self, nmr2pdb: Union[List, str], slicing=None, data_root: str = './'):
+    def build(self, nmr2pdb: Union[List, str], slicing=None, data_root: str = './', options={}):
         if isinstance(nmr2pdb, str):
             df = pd.read_csv(nmr2pdb)
             df = df.rename(columns=lambda x: x.strip())
@@ -288,7 +288,7 @@ class NMRDatasetBuilder:
         os.makedirs(self.npz_datadir(data_root), exist_ok=True)
         logging.info(f'--- BUILDING DATASET ---')
 
-        func = partial(self.process_entry, data_root=data_root, slicing=slicing)
+        func = partial(self.process_entry, data_root=data_root, slicing=slicing, options=options)
         if self.can_use_multiprocessing:
             with Pool(processes=32) as pool:
                 pool.map(func, nmr2pdb)
@@ -424,7 +424,7 @@ class NMRDatasetBuilder:
                     temp = float(row[1])
         return cs, ph, temp
 
-    def getpdb(self, pdbcode: str, datadir: str, slicing = None, downloadurl = "https://files.rcsb.org/download/"):
+    def getpdb(self, pdbcode: str, datadir: str, slicing = None, options = {}, downloadurl = "https://files.rcsb.org/download/"):
         """
         Downloads a PDB file from the Internet and saves it in a data directory.
         :param pdbcode: The standard PDB ID e.g. '3ICB' or '3icb'. You can also provide directly a pdb filename (ending in .pdb) which is already locally stored.
@@ -448,12 +448,12 @@ class NMRDatasetBuilder:
                 outfnm = os.path.join(datadir, pdbfn)
                 if url is not None and not os.path.isfile(outfnm):
                     urllib.request.urlretrieve(url, outfnm)
-            return self.parsepdb(pdbcode, outfnm, slicing=slicing)
+            return self.parsepdb(pdbcode, outfnm, slicing=slicing, options=options)
         except Exception as err:
             logging.warning(f"Skipping {pdbcode} | {str(err)}")
             return None
 
-    def parsepdb(self, pdbcode, pdb, slicing):
+    def parsepdb(self, pdbcode, pdb, slicing, options):
         pdb_info = self.get_pdb_info(pdbcode, pdb)
         
         if not pdb_info.get('pdb_has_hydrogens', False):
@@ -470,7 +470,7 @@ class NMRDatasetBuilder:
             fixer.addMissingHydrogens(pdb_info.get('pdb_ph', 7.0), forcefield=forcefield)
             PDBFile.writeFile(fixer.topology, fixer.positions, open(pdb, 'w'))
         
-        data = self.read_traj(pdb, slicing=slicing, remove_clashes=True)
+        data = self.read_traj(pdb, slicing=slicing, options=options, remove_clashes=True)
         data.update(pdb_info)
         return data
     
@@ -501,7 +501,7 @@ class NMRDatasetBuilder:
         except:
             return None, None, None, None
 
-    def read_traj(self, topology, trajectory: Optional[str]=None, slicing=None, remove_clashes=False):
+    def read_traj(self, topology, trajectory: Optional[str]=None, slicing=None, options={}, remove_clashes=False):
         u = mda.Universe(topology, trajectory) if trajectory is not None else mda.Universe(topology)
         mol = u.select_atoms('all')
 
@@ -589,7 +589,6 @@ class NMRDatasetBuilder:
         atom_dihedrals_periodic[..., :-1:2] = np.sin(rad_atom_dihedrals)
         atom_dihedrals_periodic[..., 1::2]  = np.cos(rad_atom_dihedrals)
         atom_dihedrals_periodic = np.nan_to_num(atom_dihedrals_periodic)
-        atom_dihedrals_periodic_concat = self.concat_consecutive_residue_feats(atom_dihedrals_periodic, atom_resnumbers, atom_chains)
 
         # Check overlapping (soft algorithm)
         dists = np.linalg.norm(coords[:, 1:] - coords[:, :-1], axis=-1)
@@ -623,10 +622,14 @@ class NMRDatasetBuilder:
             "atom_sasa"               : atom_sasa[:, keep_idcs],
             "atom_dihedrals"          : atom_dihedrals[:, keep_idcs],
             "atom_dihedrals_periodic" : atom_dihedrals_periodic[:, keep_idcs],
-            "atom_dihedrals_periodic_concat": atom_dihedrals_periodic_concat[:, keep_idcs],
         }
         atom_types = {k: v[keep_idcs] for k, v in atom_types.items()}
         data.update(atom_types)
+
+        if not options.get("ignore_dihedrals_concat", False):
+            atom_dihedrals_periodic_concat = self.concat_consecutive_residue_feats(atom_dihedrals_periodic, atom_resnumbers, atom_chains)
+            data.update({"atom_dihedrals_periodic_concat": atom_dihedrals_periodic_concat[:, keep_idcs],})
+
         return data
     
     def concat_consecutive_residue_feats(self, atom_dihedrals_periodic, atom_resnumbers, atom_chains):

@@ -6,7 +6,7 @@ from e3nn.util.jit import compile_mode
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
-from geqtrain.utils import add_tags_to_parameters
+from geqtrain.utils import add_tags_to_module
 
 import gpytorch
 from gpytorch.models.deep_gps.dspp import DSPPLayer, DSPP
@@ -207,7 +207,7 @@ class DSPPHiddenModule(DSPPLayer):
 
         self.distribution = out_distribution
 
-        # add_tags_to_parameters(self, 'strengthen')
+        # add_tags_to_module(self, 'strengthen')
 
     @torch.jit.ignore
     def forward(self, x):

@@ -19,6 +19,7 @@ setup(
         # make the scripts available as command line scripts
         "console_scripts": [
             "csnet-build = csnet.scripts.build_dataset:main",
+            "csnet-evaluate = csnet.scripts.evaluate:main",
         ]
     },
     install_requires=[
