@@ -5,11 +5,11 @@ import yaml
 import pynmrstar
 import requests
 import shutil
-import urllib.request
 import numpy as np
 import pandas as pd
 import difflib
 import mdtraj as md
+
 
 import MDAnalysis as mda
 from MDAnalysis.analysis import dihedrals
@@ -19,7 +19,6 @@ from typing import List, Optional, Union
 from collections import OrderedDict
 from pathlib import Path
 
-from openmm.app import PDBFile, ForceField
 from sklearn.ensemble import IsolationForest
 from geqtrain.utils import ATOMIC_NUMBER_MAP
 
@@ -123,8 +122,8 @@ class AtomTypeAssigner:
                         new_v = {_k.upper(): _v for _k, _v in v.items()}
                         self.atom_type_map[k] = new_v
                 return True
-        except:
-            logging.warning(f"Failed loading file {atom_type_map}")
+        except Exception as e:
+            logging.warning(f"Failed loading file {atom_type_map}. Error: {e}")
         return False
     
     def _prepare_groups(self) -> dict:
@@ -202,6 +201,10 @@ class NMRDatasetBuilder:
         self.statistics = {}
         self.outliers = None
 
+        from Bio.SeqUtils import IUPACData
+        AMINO_ACIDS = [aa.upper() for aa in IUPACData.protein_letters_3to1]
+        self.WHITELIST = AMINO_ACIDS
+
         logger = logging.getLogger()
         logger.setLevel(logging.INFO)
     
@@ -233,6 +236,7 @@ class NMRDatasetBuilder:
     def format_npz(self, pdbcode, bmrbid=None):
         if bmrbid is None:
             return f'{self.stem(pdbcode)}.npz'
+        bmrbid = Path(bmrbid).stem.split('.')[0]
         return f'{self.stem(pdbcode)}.{self.stem(bmrbid)}.npz'
     
     def dataset_info_filename(self, data_root):
@@ -249,19 +253,24 @@ class NMRDatasetBuilder:
         return os.path.join(data_root, 'node_type_statistics.yaml')
     
     def process_entry(self, entry, data_root, slicing, options):
-            pdbcode, bmrbid = entry
+            if len(entry) == 3:
+                pdbcode, bmrbid, chainid = entry
+            else:
+                pdbcode, bmrbid = entry
+                chainid = '_'
             if os.path.isfile(self.npz_filename(data_root, pdbcode, bmrbid)) or \
                os.path.isfile(self.npz_excluded_filename(data_root, pdbcode, bmrbid)):
                 try:    pdb = dict(np.load(self.npz_filename(data_root, pdbcode, bmrbid)))
                 except: pdb = dict(np.load(self.npz_excluded_filename(data_root, pdbcode, bmrbid)))
                 self.update_dataset_info(pdb, pdbcode, bmrbid, atom_type_assigner_is_missing=True)
                 return
+            logging.info(f'Building file {self.npz_filename(data_root, pdbcode, bmrbid)}...')
             try:
-                nmr_cs, nmr_ph, nmr_temp = self.getcs(bmrbid, datadir=os.path.join(data_root, 'bmrb.cs'))
+                nmr_cs, nmr_ph, nmr_temp = self.getcs(bmrbid, datadir=os.path.join(data_root, 'bmrb.cs'), chainid=chainid)
             except Exception as e:
                 logging.warning(e)
                 return
-            pdb = self.getpdb(pdbcode, datadir=os.path.join(data_root, 'rcsb.pdb'), slicing=slicing, options=options)
+            pdb = self.getpdb(pdbcode, chainid, datadir=os.path.join(data_root, 'rcsb.pdb/'), slicing=slicing, options=options)
             if pdb is None:
                 return
 
@@ -282,15 +291,19 @@ class NMRDatasetBuilder:
         if isinstance(nmr2pdb, str):
             df = pd.read_csv(nmr2pdb)
             df = df.rename(columns=lambda x: x.strip())
-            nmr2pdb = [(pdb, nmr) for pdb, nmr in zip(df['pdb'], df['nmr'])]
+            if 'chainid' in df.columns:
+                nmr2pdb = [(pdb, nmr, chainid if pd.notna(chainid) and chainid != '_' else 'A') for pdb, nmr, chainid in zip(df['pdb'], df['nmr'], df['chainid'])]
+            else:
+                nmr2pdb = [(pdb, nmr) for pdb, nmr in zip(df['pdb'], df['nmr'])]
         
         os.makedirs(data_root, exist_ok=True)
         os.makedirs(self.npz_datadir(data_root), exist_ok=True)
         logging.info(f'--- BUILDING DATASET ---')
 
         func = partial(self.process_entry, data_root=data_root, slicing=slicing, options=options)
-        if self.can_use_multiprocessing:
-            with Pool(processes=32) as pool:
+        num_proc = options.get("num_proc", 16)
+        if num_proc > 1 and self.can_use_multiprocessing:
+            with Pool(processes=num_proc) as pool:
                 pool.map(func, nmr2pdb)
         else:
             for entry in nmr2pdb:
@@ -375,7 +388,7 @@ class NMRDatasetBuilder:
             data.append(record)
         self._dataset_info.append(pd.DataFrame(data))
 
-    def getcs(self, bmrbid, datadir):
+    def getcs(self, bmrbid, datadir, chainid='_'):
         """
         Get NMR experimental data from file save in local computer.
         First check if the BMRB file is downloaded, if not download it to local.
@@ -391,13 +404,19 @@ class NMRDatasetBuilder:
                 entrydownload = pynmrstar.Entry.from_database(bmrbid, convert_data_types=True) #convert_data_types to import number as floats
                 entrydownload.write_to_file(file_path)
         # convert_data_types to import number as floats
-        entry = pynmrstar.Entry.from_file(file_path, convert_data_types=True)
+        try:
+            entry = pynmrstar.Entry.from_file(file_path, convert_data_types=True)
+        except:
+            entry = parse_chemical_shifts(file_path)
         # entry.write_to_file(f'{bmrbid}')
         # cs_result_sets = [] # To store all chemical shift present in the BMRB file
         cs = OrderedDict() # To store the final data
         for chemical_shift_loop in entry.get_loops_by_category("Atom_chem_shift"):
             for record in chemical_shift_loop.get_tag(['Comp_index_ID', 'Comp_ID', 'Atom_ID', 'Atom_type', 'Val', 'Val_err', 'Auth_asym_ID']):
-                cs[f'{record[6] or "A"}.{record[0]}.{record[1]}.{record[2]}'] = float(record[4])
+                try:
+                    cs[f'{record[6] or chainid}.{record[0]}.{record[1]}.{record[2]}'] = float(record[4])
+                except:
+                    continue
         
         def reorder_ordered_dict(odict):
             """
@@ -424,7 +443,7 @@ class NMRDatasetBuilder:
                     temp = float(row[1])
         return cs, ph, temp
 
-    def getpdb(self, pdbcode: str, datadir: str, slicing = None, options = {}, downloadurl = "https://files.rcsb.org/download/"):
+    def getpdb(self, pdbcode: str, chainid, datadir: str, slicing = None, options = {}):
         """
         Downloads a PDB file from the Internet and saves it in a data directory.
         :param pdbcode: The standard PDB ID e.g. '3ICB' or '3icb'. You can also provide directly a pdb filename (ending in .pdb) which is already locally stored.
@@ -440,14 +459,13 @@ class NMRDatasetBuilder:
                 os.makedirs(datadir, exist_ok=True)
                 if pdbcode.endswith(".pdb"):
                     pdbfn = pdbcode
-                    pdbcode = Path(pdbcode).stem
-                    url = None
+                    pdbcode = Path(pdbcode).stem + chainid
                 else:
-                    pdbfn = pdbcode + ".pdb"
-                    url = downloadurl + pdbfn
+                    pdbfn = pdbcode + chainid + ".pdb"
                 outfnm = os.path.join(datadir, pdbfn)
-                if url is not None and not os.path.isfile(outfnm):
-                    urllib.request.urlretrieve(url, outfnm)
+                if not os.path.isfile(outfnm):
+                    import toolbox
+                    toolbox.download_pdb(pdbcode, chainid, datadir, add_hydrogen=True, residue_whitelist=self.WHITELIST)
             return self.parsepdb(pdbcode, outfnm, slicing=slicing, options=options)
         except Exception as err:
             logging.warning(f"Skipping {pdbcode} | {str(err)}")
@@ -456,21 +474,7 @@ class NMRDatasetBuilder:
     def parsepdb(self, pdbcode, pdb, slicing, options):
         pdb_info = self.get_pdb_info(pdbcode, pdb)
         
-        if not pdb_info.get('pdb_has_hydrogens', False):
-            # Add Hydrogens
-            from pdbfixer import PDBFixer
-            forcefield = ForceField('amber14-all.xml', 'amber14/tip3p.xml')
-            fixer = PDBFixer(pdb)
-            fixer.findMissingResidues()
-            fixer.findNonstandardResidues()
-            fixer.replaceNonstandardResidues()
-            fixer.findMissingAtoms()
-            fixer.addMissingAtoms()
-            fixer.removeHeterogens(keepWater=False)
-            fixer.addMissingHydrogens(pdb_info.get('pdb_ph', 7.0), forcefield=forcefield)
-            PDBFile.writeFile(fixer.topology, fixer.positions, open(pdb, 'w'))
-        
-        data = self.read_traj(pdb, slicing=slicing, options=options, remove_clashes=True)
+        data = self.read_traj(pdb, slicing=slicing, options=options)
         data.update(pdb_info)
         return data
     
@@ -492,16 +496,20 @@ class NMRDatasetBuilder:
             keep = np.array([r is not None for r in prev])
             keep_rama = keep & np.array([r is not None for r in nxt])
 
-            resnames=["ALA", "CYS", "CYX", "GLY", "PRO", "SER", "THR", "VAL"]
-            keep_janin = np.array([r.resname not in resnames for r in residues])
-
             rama = dihedrals.Ramachandran(mol, check_protein=False).run(start=slicing.start, stop=slicing.stop, step=slicing.step)
-            janin = Janin(mol, select_protein="protein or resname DPN").run(start=slicing.start, stop=slicing.stop, step=slicing.step)
-            return rama.results.angles, keep_rama, janin.results.angles, keep_janin
+            janin_c = Janin(mol, select_protein="protein or resname DPN")
+            keep_janin = janin_c.keep_janin
+            janin = janin_c.run(start=slicing.start, stop=slicing.stop, step=slicing.step)
+            
+            rama_angles = rama.results.angles
+            assert rama_angles.shape[-2] == keep_rama.sum()
+            janin_angles = janin.results.angles
+            assert janin_angles.shape[-2] == keep_janin.sum()
+            return rama_angles, keep_rama, janin_angles, keep_janin
         except:
             return None, None, None, None
 
-    def read_traj(self, topology, trajectory: Optional[str]=None, slicing=None, options={}, remove_clashes=False):
+    def read_traj(self, topology, trajectory: Optional[str]=None, slicing=None, options={}):
         u = mda.Universe(topology, trajectory) if trajectory is not None else mda.Universe(topology)
         mol = u.select_atoms('all')
 
@@ -557,7 +565,10 @@ class NMRDatasetBuilder:
             traj = md.load_xtc(trajectory, top=topology)
         elif trajectory.endswith('.trr'):
             traj = md.load_trr(trajectory, top=topology)
-        sasa = md.shrake_rupley(traj, probe_radius=1.4, mode='residue')
+        if options.get("sasa", True):
+            sasa = md.shrake_rupley(traj, probe_radius=1.4, mode='residue')
+        else:
+            sasa = None
         dssp = md.compute_dssp(traj, simplified=True)
         rama, keep_rama, janin, keep_janin = self.compute_rama(mol, slicing)
         atom_dihedrals = np.zeros((len(u.trajectory[slicing]), u.atoms.n_atoms, 4), dtype=np.float32)
@@ -571,7 +582,7 @@ class NMRDatasetBuilder:
             frame_atom_ss   = np.empty((u.atoms.n_atoms), dtype=str)
             for idx, residue in enumerate(u.residues):
                 ss = dssp[ts.frame, idx]
-                asa = sasa[ts.frame, idx]
+                asa = sasa[ts.frame, idx] if sasa is not None else 0
                 for atom in residue.atoms:
                     atom_index = atom.index
                     frame_atom_sasa[atom_index] = asa
@@ -590,24 +601,26 @@ class NMRDatasetBuilder:
         atom_dihedrals_periodic[..., 1::2]  = np.cos(rad_atom_dihedrals)
         atom_dihedrals_periodic = np.nan_to_num(atom_dihedrals_periodic)
 
-        # Check overlapping (soft algorithm)
-        dists = np.linalg.norm(coords[:, 1:] - coords[:, :-1], axis=-1)
-        if np.any(dists < 0.5):
-            raise Exception(f"Found clashing atoms (distance < 0.5 Angstrom)")
-
+        def remove_clashing_atoms(coords):
+            n_frames, n_atoms, _ = coords.shape
+            keep_idcs = np.ones(n_atoms, dtype=bool)
+            for frame in range(n_frames):
+                distances = np.linalg.norm(coords[frame, :, np.newaxis] - coords[frame, np.newaxis, :], axis=-1)
+                np.fill_diagonal(distances, np.inf)
+                clashing_pairs = np.argwhere(distances < 0.5)
+                for i, j in clashing_pairs:
+                    if keep_idcs[i] and keep_idcs[j]:
+                        keep_idcs[j] = False  # Remove one of the clashing atoms
+            if not np.all(keep_idcs):
+                logging.warning(f"Removed {np.sum(~keep_idcs)} clashing atoms.")
+            return keep_idcs
+        
+        # - Remove clashing atoms - #
+        keep_idcs = remove_clashing_atoms(coords)
         atom_sasa = np.stack(atom_sasa)
         atom_ss = np.stack(atom_ss)
         ss_mapping = {'C': 0, 'E': 1, 'H': 2, 'N': 3}
         atom_ss_int = np.vectorize(ss_mapping.get)(atom_ss)
-
-        # - Remove clashing atoms - #
-        if remove_clashes:
-            mask = np.triu_indices(coords.shape[1], k=1)
-            lengths = np.linalg.norm(coords[:, mask[0]] - coords[:, mask[1]], axis=-1)
-            keep_edges = np.all(lengths > 0.5, axis=0)
-            keep_idcs = np.union1d(np.unique(mask[0][keep_edges]), np.unique(mask[1][keep_edges]))
-        else:
-            keep_idcs = np.arange(coords.shape[1])
 
         # Build dataset
         data = {
@@ -712,9 +725,9 @@ class NMRDatasetBuilder:
             'pdb_has_hydrogens': pdb_has_hydrogens,
         }
         if ph is not None:
-            info['pdb_ph']   = ph
+            info['pdb_ph']   = float(ph)
         if temperature is not None:
-            info['pdb_temp'] = temperature
+            info['pdb_temp'] = float(temperature)
         
         return info
     
@@ -864,7 +877,7 @@ class NMRDatasetBuilder:
         # Assign chemical shifts
         nmr = {aligned_k: v for aligned_k, v in zip(aligned_nmr_atom_fullnames, aligned_nmr_values)}
         nmr_cs_list = [nmr[atom_fullname] if atom_fullname in nmr else np.nan for atom_fullname in aligned_pdb_atom_fullnames]
-        num_structures = len(pdb.get('coords'))
+        num_structures = len(pdb.get('coords')) if len(pdb.get('coords')) == 3 else 1
         chemical_shifts = np.tile(np.array(nmr_cs_list), (num_structures, 1))
         pdb['chemical_shifts'] = chemical_shifts
         
@@ -941,7 +954,9 @@ class NMRDatasetBuilder:
         logging.info(f'- Loading data from npz -')
         self._dataset_info = []
         for filename in os.listdir(self.npz_datadir(data_root)):
-            pdbcode, bmrbid = Path(filename).stem.split('.')
+            splits = Path(filename).stem.split('.')
+            pdbcode = splits[0]
+            bmrbid  = splits[1]
             pdb = dict(np.load(self.npz_filename(data_root, pdbcode, bmrbid)))
             self.update_dataset_info(pdb, pdbcode, bmrbid, atom_type_assigner_is_missing)
         if save:
@@ -1106,7 +1121,7 @@ class Janin(dihedrals.Ramachandran):
         self.results.angles.append(chis)
     
     def __init__(self, atomgroup,
-                 select_remove="resname ALA CYS* GLY PRO SER THR VAL",
+                 select_remove="resname ALA CYS* CYX GLY PRO SER THR VAL",
                  select_protein="protein",
                  **kwargs):
         r"""Parameters
@@ -1171,7 +1186,82 @@ class Janin(dihedrals.Ramachandran):
             new_ag = ag.universe.select_atoms('index ' + ' '.join(str(atom.index) for atom in unique_atoms))
             setattr(self, f'ag{i+1}', new_ag)
         
+        # Compute the intersection of resindices
+        common_resindices = set(self.ag1.resindices)
+        for ag in [self.ag2, self.ag3, self.ag4, self.ag5]:
+            common_resindices.intersection_update(ag.resindices)
+
+        # Filter out atoms whose resindices are not present in all
+        self.ag1 = self.ag1.select_atoms(f"resindex {' '.join(map(str, common_resindices))}")
+        self.ag2 = self.ag2.select_atoms(f"resindex {' '.join(map(str, common_resindices))}")
+        self.ag3 = self.ag3.select_atoms(f"resindex {' '.join(map(str, common_resindices))}")
+        self.ag4 = self.ag4.select_atoms(f"resindex {' '.join(map(str, common_resindices))}")
+        self.ag5 = self.ag5.select_atoms(f"resindex {' '.join(map(str, common_resindices))}")
+
+        self.keep_janin = np.isin(atomgroup.residues.resindices, list(common_resindices))
 
     def _conclude(self):
         self.results.angles = (np.rad2deg(np.array(
             self.results.angles)) + 360) % 360
+    
+def parse_chemical_shifts(file_path):
+
+    class Result:
+
+        def __init__(self, df, ph, temp):
+
+            class Obj:
+                def __init__(self, df, ph, temp):
+                    self.df = df
+                    self.ph = ph
+                    self.temp = temp
+                
+                def get_tag(self, x):
+                    return self.df.itertuples(index=False, name=None)
+                
+                def get_loop(self, x):
+                    return [('ph', self.ph), ('temperature', self.temp)]
+
+            self.obj = Obj(df, ph, temp)
+
+        def get_loops_by_category(self, x):
+            return [self.obj]
+        
+        def get_saveframes_by_category(self, x):
+            return [self.obj]
+
+    data = []
+    with open(file_path, 'r') as file:
+        ph = 7.0
+        temp = 298.0
+        for line in file:
+            if line.strip():
+                parts = line.split()
+                if len(parts) == 4:
+                    try:
+                        if parts[0] == 'pH':
+                            try:
+                                ph = float(parts[1])
+                            except:
+                                ph = 7.0
+                        elif parts[0] == 'temperature':
+                            try:
+                                temp = float(parts[1])
+                            except:
+                                temp = 278.0
+                    except:
+                        continue
+                elif len(parts) == 8:
+                    try:
+                        Comp_index_ID = int(parts[1])
+                        Comp_ID = parts[2]
+                        Atom_ID = parts[3]
+                        Atom_type = parts[4]
+                        Val = float(parts[5])
+                        Val_err = None if parts[6] == '.' else float(parts[6])
+                        data.append([Comp_index_ID, Comp_ID, Atom_ID, Atom_type, Val, Val_err, None])
+                    except:
+                        continue
+    
+    df = pd.DataFrame(data, columns=['Comp_index_ID', 'Comp_ID', 'Atom_ID', 'Atom_type', 'Val', 'Val_err', 'Auth_asym_ID'])
+    return Result(df, ph, temp)
