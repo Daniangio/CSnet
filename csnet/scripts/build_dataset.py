@@ -43,9 +43,10 @@ def main():
 
     # Initialize the NMRDataset with the config file
     dataset_builder = NMRDatasetBuilder(args.config, args.atom_type_map)
+    options = {"ignore_dihedrals_concat": True}
 
     # Build the dataset
-    dataset_builder.build(args.nmr2pdb, slicing=slice(0, args.max_structures), data_root=args.data_root)
+    dataset_builder.build(args.nmr2pdb, slicing=slice(0, args.max_structures), data_root=args.data_root, options=options)
     dataset_builder.filter_npz_datasets(data_root=args.data_root)
     dataset_builder.build_statistics(data_root=args.data_root)
     dataset_builder.extract_outliers()

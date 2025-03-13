@@ -109,7 +109,7 @@ class NMR:
                         except:
                             continue
                         if len(splits) == len(data_columns):
-                            _section = "data_rows_" + '_'.join(_section.split('_')[2:])
+                            _section = "data_rows_" + JOIN_CHAR.join(_section.split(JOIN_CHAR)[2:])
                             data_rows.append(splits)
                         else:
                             continue
