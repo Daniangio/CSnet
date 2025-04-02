@@ -32,9 +32,9 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
 
     def __init__(
         self,
-        field: str,
-        out_field: str,
         num_types: int,
+        out_field: str,
+        field: str = AtomicDataDict.NODE_OUTPUT_KEY,
         out_irreps: Optional[Union[Irreps, str]] = None,
         grid_range: Optional[List[float]] = None,
         num_inducing_points: Optional[int] = None,
@@ -137,7 +137,7 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
             features = features * torch.nan
         
         data[self.out_field_dspp] = features
-        data[self.out_field] = features.mean
+        data[self.out_field] = features.mean.transpose(0, 1).mean(dim=-1, keepdim=True)
         return data
 
     # Implement __call__ to skip output validation, which does not accept dict as output
