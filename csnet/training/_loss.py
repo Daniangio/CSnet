@@ -3,12 +3,12 @@ from typing import Dict
 import gpytorch
 import torch.nn
 
-from geqtrain.train._loss import SimpleLoss, SimpleGraphLoss
+from geqtrain.train._loss import SimpleLoss, SimpleGraphLoss, SimpleNodeLoss
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import SequentialGraphNetwork
 
 
-class SimpleNodeLoss(SimpleGraphLoss):
+class SimpleNodeRereferencedLoss(SimpleGraphLoss):
     """
     """
 
@@ -31,7 +31,7 @@ class SimpleNodeLoss(SimpleGraphLoss):
             return loss.sum() / not_nan_filter.sum() # + penalty
         loss[~not_nan_filter.bool()] = torch.nan
         return loss
-    
+
     def prepare(
         self,
         pred: Dict,
@@ -45,11 +45,11 @@ class SimpleNodeLoss(SimpleGraphLoss):
         if len(pred_key) == num_atoms:
             pred_key = pred_key[center_nodes_filter]
             not_nan_pred_filter = not_nan_pred_filter[center_nodes_filter]
-        
+
         if len(ref_key)  == num_atoms:
             ref_key  = ref_key [center_nodes_filter]
             not_nan_ref_filter = not_nan_ref_filter[center_nodes_filter]
-        
+
         pred_key = pred_key.view_as(ref_key)
         not_nan_filter = not_nan_pred_filter * not_nan_ref_filter
 
@@ -83,7 +83,7 @@ class SimpleNodeLoss(SimpleGraphLoss):
         return pred_key, ref_key, not_nan_filter, corrections, center_nodes_filter
 
 
-class NodeSimpleEnsembleLoss(SimpleNodeLoss):
+class NodeSimpleEnsembleLoss(SimpleNodeRereferencedLoss):
     """
     """
     def __init__(self, func_name, params=...):
@@ -101,20 +101,20 @@ class NodeSimpleEnsembleLoss(SimpleNodeLoss):
         **kwargs,
     ):
         pred_key, ref_key, not_nan_filter, corrections, center_nodes_filter = self.prepare(pred, ref, key, **kwargs)
-        
+
         ensemble_indices = pred['ensemble_index']
         unique_ensembles = torch.unique(ensemble_indices)
         batch_indices    = pred['batch'][center_nodes_filter]
         unique_batches   = torch.unique(batch_indices)
-        
+
         weighted_loss = 0.0
         total_weight  = 0.0
 
         epoch = kwargs.get('epoch', 0)
-        
+
         peak_epoch = self.peak_epoch if hasattr(self, "peak_epoch") else 50.
         temperature = self.initial_temperature - (self.initial_temperature - self.max_temperature) * min(epoch / peak_epoch, 1.0)
-        
+
         for ensemble in unique_ensembles:
             ensemble_batch_mask = (ensemble_indices == ensemble)
             ensemble_batches = unique_batches[ensemble_batch_mask]
@@ -122,29 +122,82 @@ class NodeSimpleEnsembleLoss(SimpleNodeLoss):
             ensemble_pred = pred_key[ensemble_mask]
             ensemble_ref  = ref_key [ensemble_mask]
             ensemble_not_nan = not_nan_filter[ensemble_mask]
-            
+
             distances = torch.abs(ensemble_pred - ensemble_ref).detach()
             ensemble_batch_indices = batch_indices[ensemble_mask]
-            
+
             # Calculate weights for each atom independently
             weights = torch.zeros_like(distances)
             n_atoms_per_ensemble_batch = sum(ensemble_batch_indices == ensemble_batch_indices[0])
-            
+
             for atom_idx in range(n_atoms_per_ensemble_batch):
                 atom_mask = slice(atom_idx, None, n_atoms_per_ensemble_batch)
                 atom_distances = distances[atom_mask]
                 min_distance = atom_distances.min()
                 weights[atom_mask] = self._factor * torch.exp(-atom_distances / (min_distance * temperature))
-                
+
             weighted_loss += (self.func(ensemble_pred, ensemble_ref) * weights * ensemble_not_nan).sum()
             total_weight  += (weights * ensemble_not_nan).sum()
-        
+
         if mean:
             return weighted_loss / total_weight
-        
+
         loss = self.func(pred_key, ref_key) * not_nan_filter
         loss[~not_nan_filter.bool()] = torch.nan
         return loss
+
+
+class BinnedLoss(SimpleGraphLoss):
+    """
+    """
+
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str,
+        mean: bool = True,
+        **kwargs,
+    ):
+        pred_key, ref_key, not_nan_filter = self.prepare(pred, ref, key, **kwargs)
+        not_nan_filter = not_nan_filter[:, 0]
+
+        # Calculate bin width
+        bin_width = (self.max_value - self.min_value) / self.bins
+
+        # Assign target value to the correct bin
+        target_bins = ((ref_key - self.min_value) / bin_width).long().clamp(0, self.bins - 1).squeeze()
+
+        # Apply cross-entropy loss
+        loss = torch.nn.functional.cross_entropy(pred_key, target_bins, reduction='none') * not_nan_filter
+
+        if mean:
+            return loss.sum() / not_nan_filter.sum()
+
+        loss[~not_nan_filter.bool()] = torch.nan
+        return loss
+
+
+    def prepare(
+        self,
+        pred: Dict,
+        ref:  Dict,
+        key:  str,
+        **kwargs,
+    ):
+        pred_key, not_nan_pred_filter, ref_key, not_nan_ref_filter = super().prepare(pred, ref, key, **kwargs)
+        center_nodes_filter = pred.get(AtomicDataDict.EDGE_INDEX_KEY)[0].unique()
+        num_atoms = len(pred[AtomicDataDict.POSITIONS_KEY])
+        if len(pred_key) == num_atoms:
+            pred_key = pred_key[center_nodes_filter]
+            not_nan_pred_filter = not_nan_pred_filter[center_nodes_filter]
+
+        if len(ref_key)  == num_atoms:
+            ref_key  = ref_key [center_nodes_filter]
+            not_nan_ref_filter = not_nan_ref_filter[center_nodes_filter]
+
+        not_nan_filter = not_nan_pred_filter * not_nan_ref_filter
+        return pred_key, ref_key, not_nan_filter
 
 
 class GPLoss(SimpleLoss): # Marginal Log Likelihood
@@ -159,11 +212,11 @@ class GPLoss(SimpleLoss): # Marginal Log Likelihood
         super(GPLoss, self).__init__(func_name, params)
         self.likelihood = None
         self.mll = None
-        
+
     def init_loss(self, model, num_data, obj=gpytorch.mlls.VariationalELBO, beta=0.05):
         self.likelihood = model.likelihood
         self.obj = obj(self.likelihood, model.gp_module, num_data=num_data, beta=beta)
-    
+
     def __call__(
         self,
         pred: dict,
@@ -173,7 +226,7 @@ class GPLoss(SimpleLoss): # Marginal Log Likelihood
         **kwargs,
     ):
         pred_key, ref_key, corrections = self.prepare(pred, ref, key, **kwargs)
-        
+
         assert mean
         loss = -self.obj(pred_key, ref_key.transpose(0, 1))
         # penalty = sum(correction ** 2 for correction in corrections)
@@ -188,11 +241,11 @@ class GPLoss(SimpleLoss): # Marginal Log Likelihood
     ):
         pred_key = pred.get(key)
         ref_key = ref.get(key, ref.get(key[:-5]))
-        
+
         center_nodes_filter = pred.get(AtomicDataDict.EDGE_INDEX_KEY)[0].unique()
         if len(ref_key) > len(center_nodes_filter):
             ref_key = ref_key[center_nodes_filter]
-        
+
         if hasattr(self, "rereference") and self.rereference:
             def rereference(y_pred, y_true, dataset_idcs, node_types, alpha=1.):
                 """
@@ -236,7 +289,7 @@ class GPMAELoss(GPLoss):
         params: dict = {},
     ):
         super(GPLoss, self).__init__(func_name, params)
-    
+
     def __call__(
         self,
         pred: dict,
@@ -265,7 +318,7 @@ class GPdpllLoss(GPLoss): # Deep Predictive Log Likelihood
         params: dict = {},
     ):
         super(GPdpllLoss, self).__init__(func_name, params)
-        
+
     def init_loss(self, model: SequentialGraphNetwork, num_data, obj=gpytorch.mlls.DeepPredictiveLogLikelihood, beta=0.05):
         try:
             self.likelihood = model.get_param('likelihood')
@@ -284,7 +337,7 @@ class GPdpllMAELoss(GPdpllLoss):
         params: dict = {},
     ):
         super(GPdpllMAELoss, self).__init__(func_name, params)
-    
+
     def __call__(
         self,
         pred: dict,
@@ -303,7 +356,7 @@ class GPdpllMAELoss(GPdpllLoss):
         return loss
 
 
-class GNLLoss(SimpleNodeLoss): # Uncertainty-aware loss.
+class GNLLoss(SimpleNodeRereferencedLoss): # Uncertainty-aware loss.
     """
     """
 
@@ -337,7 +390,7 @@ class GNLLoss(SimpleNodeLoss): # Uncertainty-aware loss.
         return loss
 
 
-class GNLNodeLoss(SimpleNodeLoss): # Uncertainty-aware loss.
+class GNLNodeLoss(SimpleNodeRereferencedLoss): # Uncertainty-aware loss.
     """
     """
 
@@ -366,6 +419,56 @@ class GNLNodeLoss(SimpleNodeLoss): # Uncertainty-aware loss.
         uncertainty = pred['uncertainty'][center_nodes_filter]
 
         loss = self.func(pred_key, ref_key, uncertainty**2) * not_nan_filter
+        if mean:
+            return loss.sum() / not_nan_filter.sum()
+        loss[~not_nan_filter.bool()] = torch.nan
+        return loss
+
+
+class GradientLoss(SimpleNodeLoss):
+    """
+    """
+
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+    ):
+
+        self.func_name = func_name
+        for key, value in params.items():
+            setattr(self, key, value)
+
+        # instantiates torch.nn loss func
+        self.func = torch.nn.MSELoss()
+
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str,
+        mean: bool = True,
+        **kwargs,
+    ):
+        pred_key, ref_key, not_nan_filter, center_nodes_filter = self.prepare(pred, ref, key, **kwargs)
+        coords = pred[AtomicDataDict.POSITIONS_KEY]
+
+        # Compute the gradient of pred_key w.r.t. coords
+        # grad_outputs = torch.ones_like(pred_key)
+        gradients = torch.autograd.grad(
+            outputs=pred_key.sum(),
+            inputs=coords,
+            # grad_outputs=grad_outputs,
+            create_graph=True,
+            retain_graph=True,
+            # only_inputs=True,
+        )[0][center_nodes_filter]
+
+        # Compute the norm of the gradient vectors
+        gradient_norms = torch.norm(gradients, dim=-1, keepdim=True)
+
+        # Compare the gradient norms with ref_key
+        loss = self.func(gradient_norms, ref_key) * not_nan_filter
         if mean:
             return loss.sum() / not_nan_filter.sum()
         loss[~not_nan_filter.bool()] = torch.nan

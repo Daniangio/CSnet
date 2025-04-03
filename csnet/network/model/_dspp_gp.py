@@ -13,7 +13,6 @@ def DSPPGP(model: GraphModuleMixin, config, initialize: bool, dataset: Optional[
     layers = {
         "wrapped_model": model,
         "dsppgp": (DSPPGPModule, dict(
-            field=AtomicDataDict.NODE_OUTPUT_KEY,
             out_field=AtomicDataDict.NODE_OUTPUT_KEY,
         )),
     }

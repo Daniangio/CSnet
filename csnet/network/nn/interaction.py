@@ -11,7 +11,7 @@ from einops import rearrange
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
-from csnet.network.nn import ScalarMLPFunction
+from geqtrain.nn import ScalarMLPFunction
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import (

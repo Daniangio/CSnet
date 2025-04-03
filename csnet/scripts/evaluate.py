@@ -130,7 +130,7 @@ def load_model(model: Union[str, Path], device="cpu"):
 
     # load a training session model
     model, model_config = Trainer.load_model_from_training_session(
-        traindir=model.parent, model_name=model.name, device=device
+        traindir=model.parent, model_name=model.name, device=device, for_inference=True
     )
     logger.info("loaded model from training session.")
     model.eval()
@@ -139,8 +139,7 @@ def load_model(model: Union[str, Path], device="cpu"):
 
 def main(args=None, running_as_script: bool = True):
     # in results dir, do: geqtrain-deploy build --train-dir . deployed.pth
-    parser = argparse.ArgumentParser(
-    )
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "-td",
         "--train-dir",
@@ -321,10 +320,14 @@ def main(args=None, running_as_script: bool = True):
         def format_csv(data, pred_data, ref_data, batch_index, chunk_index):
             try:
                 # Extract fields from data
-                node_output = pred_data.get(AtomicDataDict.NODE_OUTPUT_KEY + '_dspp', pred_data.get(AtomicDataDict.NODE_OUTPUT_KEY, None))
+                # node_output = pred_data.get(AtomicDataDict.NODE_OUTPUT_KEY + '_dspp', pred_data.get(AtomicDataDict.NODE_OUTPUT_KEY, None))
+                node_output = pred_data.get('node_output_bins', pred_data.get(AtomicDataDict.NODE_OUTPUT_KEY, None))
                 if node_output is None:
                     return ''
-                if not isinstance(node_output, torch.Tensor): node_output = node_output.mean[0]
+                if not isinstance(node_output, torch.Tensor):
+                    mean = node_output.mean[0]
+                    pred_data['uncertainty'] = node_output.stddev[0]
+                    node_output = mean
                 node_type       = pred_data[AtomicDataDict.NODE_TYPE_KEY]
                 atom_number     = pred_data.get(AtomicDataDict.ATOM_NUMBER_KEY, node_type)
                 ref_node_output = ref_data.get(AtomicDataDict.NODE_OUTPUT_KEY, None)
