@@ -3,12 +3,12 @@ from typing import Dict
 import gpytorch
 import torch.nn
 
-from geqtrain.train._loss import SimpleLoss, SimpleGraphLoss, SimpleNodeLoss
+from geqtrain.train._loss import SimpleLoss, SimpleLossWithNaNsFilter, SimpleNodeLoss
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import SequentialGraphNetwork
 
 
-class SimpleNodeRereferencedLoss(SimpleGraphLoss):
+class SimpleNodeRereferencedLoss(SimpleLossWithNaNsFilter):
     """
     """
 
@@ -147,7 +147,7 @@ class NodeSimpleEnsembleLoss(SimpleNodeRereferencedLoss):
         return loss
 
 
-class BinnedLoss(SimpleGraphLoss):
+class BinnedLoss(SimpleLossWithNaNsFilter):
     """
     """
 
