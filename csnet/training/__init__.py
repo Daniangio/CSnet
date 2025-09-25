@@ -1,14 +1,16 @@
-from ._loss import NodeSimpleLoss, GPLoss, GPMAELoss, GPdpllLoss, GPdpllMAELoss, NoiseLoss, GNLLoss, GNLNodeLoss
+from ._loss import SimpleNodeLoss, NodeSimpleEnsembleLoss, GPLoss, GPMAELoss, GPdpllLoss, GPdpllMAELoss, GNLLoss, GNLNodeLoss, BinnedLoss, GradientLoss
 from .dataset import build_dataset
 
 __all__ = [
     build_dataset,
-    NodeSimpleLoss,
+    SimpleNodeLoss,
+    NodeSimpleEnsembleLoss,
     GPLoss,
     GPMAELoss,
     GPdpllLoss,
     GPdpllMAELoss,
-    NoiseLoss,
     GNLLoss,
     GNLNodeLoss,
+    BinnedLoss,
+    GradientLoss,
 ]

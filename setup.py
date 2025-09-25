@@ -24,9 +24,11 @@ setup(
     },
     install_requires=[
         "MDAnalysis",
+        "mdakit-sasa",
         "pandas",
         "plotly",
         "gpytorch",
+        "pynmrstar",
     ],
     zip_safe=True,
 )

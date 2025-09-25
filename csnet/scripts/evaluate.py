@@ -320,8 +320,8 @@ def main(args=None, running_as_script: bool = True):
         def format_csv(data, pred_data, ref_data, batch_index, chunk_index):
             try:
                 # Extract fields from data
-                # node_output = pred_data.get(AtomicDataDict.NODE_OUTPUT_KEY + '_dspp', pred_data.get(AtomicDataDict.NODE_OUTPUT_KEY, None))
-                node_output = pred_data.get('node_output_bins', pred_data.get(AtomicDataDict.NODE_OUTPUT_KEY, None))
+                # node_output = pred_data.get("node_output" + '_dspp', pred_data.get("node_output", None))
+                node_output = pred_data.get('node_output_bins', pred_data.get("node_output", None))
                 if node_output is None:
                     return ''
                 if not isinstance(node_output, torch.Tensor):
@@ -330,7 +330,7 @@ def main(args=None, running_as_script: bool = True):
                     node_output = mean
                 node_type       = pred_data[AtomicDataDict.NODE_TYPE_KEY]
                 atom_number     = pred_data.get(AtomicDataDict.ATOM_NUMBER_KEY, node_type)
-                ref_node_output = ref_data.get(AtomicDataDict.NODE_OUTPUT_KEY, None)
+                ref_node_output = ref_data.get("node_output", None)
                 uncertainty     = pred_data.get('uncertainty', None)
                 atom_fullname   = data['atom_fullnames'][0]
                 node_centers    = pred_data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()

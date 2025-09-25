@@ -4,7 +4,7 @@ from torch.utils.data import ConcatDataset
 from geqtrain.nn import GraphModuleMixin, SequentialGraphNetwork
 from geqtrain.data import AtomicDataDict
 
-from csnet.network.nn import DSPPGPModule
+from csnet.nn import DSPPGPModule
 
 
 def DSPPGP(model: GraphModuleMixin, config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> DSPPGPModule:
@@ -13,7 +13,7 @@ def DSPPGP(model: GraphModuleMixin, config, initialize: bool, dataset: Optional[
     layers = {
         "wrapped_model": model,
         "dsppgp": (DSPPGPModule, dict(
-            out_field=AtomicDataDict.NODE_OUTPUT_KEY,
+            out_field="node_output",
         )),
     }
 

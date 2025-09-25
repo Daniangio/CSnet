@@ -1,13 +1,13 @@
 from geqtrain.nn import GraphModuleMixin
 from geqtrain.data import AtomicDataDict
-from csnet.network.nn import VariationalGPModule
+from csnet.nn import VariationalGPModule
 
 
 def VariationalGP(model: GraphModuleMixin, config) -> VariationalGPModule:
     r"""Compute dipole moment.
 
     Args:
-        model: the model to wrap. Must have ``AtomicDataDict.NODE_OUTPUT_KEY`` as an output.
+        model: the model to wrap. Must have ``"node_output"`` as an output.
 
     Returns:
         A ``VariationalGPModule`` wrapping ``model``.
@@ -15,8 +15,8 @@ def VariationalGP(model: GraphModuleMixin, config) -> VariationalGPModule:
     
     return VariationalGPModule(
         func=model,
-        field=AtomicDataDict.NODE_OUTPUT_KEY,
-        out_field=AtomicDataDict.NODE_OUTPUT_KEY,
+        field="node_output",
+        out_field="node_output",
         out_irreps=config.get('out_irreps', None),
         num_inducing_points=config.get('num_inducing_points', 512),
     )

@@ -1,5 +1,6 @@
 import math
 import functools
+import random
 import torch
 import torch.nn.functional as F
 
@@ -9,7 +10,7 @@ from torch_scatter import scatter
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
-from csnet.network.nn import ScalarMLPFunction
+from geqtrain.nn import ScalarMLPFunction
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import (
@@ -82,6 +83,16 @@ class ScalarInteractionModule(GraphModuleMixin, torch.nn.Module):
 
         self.out_multiplicity = self.out_irreps[0].mul
         
+        self.embedding_interaction_blocks = torch.nn.ModuleList([])
+        for layer_index in range(self.num_layers):
+            self.embedding_interaction_blocks.append(
+                ScalarInteractionBlock(
+                    layer_index=layer_index,
+                    parent=self,
+                    latent=latent,
+                )
+            )
+        
         self.interaction_blocks = torch.nn.ModuleList([])
         for layer_index in range(self.num_layers):
             self.interaction_blocks.append(
@@ -96,7 +107,7 @@ class ScalarInteractionModule(GraphModuleMixin, torch.nn.Module):
 
         self.irreps_out.update({self.out_field: self.out_irreps})
 
-    def forward(self, data: AtomicDataDict.Type, recycles: int = 3) -> AtomicDataDict.Type:
+    def forward(self, data: AtomicDataDict.Type, recycles: Optional[int] = None) -> AtomicDataDict.Type:
         data = AtomicDataDict.with_edge_vectors(data, with_lengths=True)
 
         edge_index = data[AtomicDataDict.EDGE_INDEX_KEY]
@@ -105,9 +116,13 @@ class ScalarInteractionModule(GraphModuleMixin, torch.nn.Module):
         # Initialize state
         latents = torch.zeros((num_edges, self.latent_dim), dtype=torch.float32, device=edge_index.device)
 
-        for recycle in range(recycles):
-            for interaction_block in self.interaction_blocks:
-                latents = interaction_block(data=data, latents=latents)
+        for interaction_block in self.embedding_interaction_blocks:
+            latents = interaction_block(data=data, latents=latents)
+
+        # if recycles is None: recycles = torch.randint(2, 7, (1,)).item() if self.training else 2
+        # for recycle in range(recycles):
+        #     for interaction_block in self.interaction_blocks:
+        #         latents = interaction_block(data=data, latents=latents)
 
         data[self.out_field] = latents
         return data
@@ -172,9 +187,9 @@ class ScalarInteractionBlock(torch.nn.Module):
 
     def forward(
         self,
-        data,
-        latents,
-    ):
+        data: AtomicDataDict.Type,
+        latents: torch.Tensor,
+    ) -> torch.Tensor:
         edge_center   = data[AtomicDataDict.EDGE_INDEX_KEY][0]
         edge_neighbor = data[AtomicDataDict.EDGE_INDEX_KEY][1]
         edge_length   = data[AtomicDataDict.EDGE_LENGTH_KEY]

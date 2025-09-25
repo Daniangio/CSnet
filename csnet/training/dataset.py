@@ -340,8 +340,8 @@ def run_inference(
                 cs.append(evaluate(
                     model=model,
                     batch=batch,
-                    node_out_keys=[AtomicDataDict.NODE_OUTPUT_KEY]
-                )[AtomicDataDict.NODE_OUTPUT_KEY].cpu().numpy())
+                    node_out_keys=["node_output"]
+                )["node_output"].cpu().numpy())
             except:
                 pass
         cs = np.stack(cs, axis=0)

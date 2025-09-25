@@ -34,7 +34,7 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
         self,
         num_types: int,
         out_field: str,
-        field: str = AtomicDataDict.NODE_OUTPUT_KEY,
+        field: str = "node_output",
         out_irreps: Optional[Union[Irreps, str]] = None,
         grid_range: Optional[List[float]] = None,
         num_inducing_points: Optional[int] = None,
@@ -122,6 +122,7 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
             # Apply per-type std scaling if available
             if self.per_type_std is not None:
                 scaling = self.per_type_std[center_species].transpose(0, 1).abs()
+                scaling = torch.clamp(scaling, min=1e-4, max=1e4)
                 mean = mean * scaling
 
                 scaling_diag = torch.diag_embed(scaling.flatten())
@@ -132,6 +133,7 @@ class DSPPGPModule(GraphModuleMixin, DSPP):
                 mean += self.per_type_bias[center_species].transpose(0, 1)
         
         try:
+            covar = covar + torch.eye(covar.size(-1), device=covar.device) * 1e-4
             features = self.distribution(mean, covar)
         except:
             features = features * torch.nan
@@ -187,7 +189,7 @@ class DSPPHiddenModule(DSPPLayer):
             variational_distribution,
             learn_inducing_locations=True,
         )
-        super(DSPPHiddenModule, self).__init__(variational_strategy, input_dim, output_dim, Q)
+        super(DSPPHiddenModule, self).__init__(variational_strategy, input_dim, output_dim, Q, 0)
 
         # Mean and covariance modules
         assert mean_type in ['constant', 'linear']
